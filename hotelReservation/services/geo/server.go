@@ -3,12 +3,12 @@ package geo
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/geo/proto"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/hailocab/go-geoindex"
@@ -66,23 +66,42 @@ func (s *Server) Run() error {
 		opts = append(opts, tlsopt)
 	}
 
-	srv := grpc.NewServer(opts...)
-
-	pb.RegisterGeoServer(srv, s)
-
-	// listener
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
+	hrs := unicomm.HRServer[pb.GeoServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/geo.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterGeoServer,
+		Server:     s,
 	}
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	return hrs.RunServers(opts...)
+	// srv := grpc.NewServer(opts...)
+	// // uniSrv := grpc.NewServer(opts...)
 
-	return srv.Serve(lis)
+	// pb.RegisterGeoServer(srv, s)
+	// // pb.RegisterGeoServer(uniSrv, s)
+
+	// // lis, err := unicomm.NewUnixSocket("/var/run/hrsock/geo.sock")
+	// // if err != nil {
+	// // 	return fmt.Errorf("failed to listen: %v", err)
+	// // }
+
+	// // listener
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	return fmt.Errorf("failed to listen: %v", err)
+	// }
+
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
+
+	// return srv.Serve(lis)
 }
 
 // Shutdown cleans up any processes

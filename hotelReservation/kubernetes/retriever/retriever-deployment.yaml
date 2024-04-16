@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.22.0 (955b78124)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: retriever 
+  name: retriever
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: retriever
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.22.0 (955b78124)
+        sidecar.istio.io/statsInclusionPrefixes: cluster.outbound,cluster_manager,listener_manager,http_mixer_filter,tcp_mixer_filter,server,cluster.xds-grp,listener,connection_manager
+        sidecar.istio.io/statsInclusionRegexps: http.*
+      creationTimestamp: null
+      labels:
+        io.kompose.service: retriever
+    spec:
+      containers:
+        - command:
+          # - python
+          # args:
+          # - /retriever/main.py
+            - sleep
+          args:
+            - infinity
+          image: anliu/hr-agents:static
+          imagePullPolicy: Never
+          name: hotel-reserv-retriever
+          ports:
+            - containerPort: 8088
+            - containerPort: 8888
+          resources:
+            requests:
+              cpu: 500m
+            limits:
+              cpu: 5000m
+              nvidia.com/gpu: 1 # requesting 1 GPU
+          volumeMounts:
+          - name: sock-volume
+            mountPath: /var/run/hrsock
+          - name: redis-sock
+            mountPath: /var/run/redis
+      volumes:
+        - name: sock-volume
+          persistentVolumeClaim:
+            claimName: hrsock-pvc-0
+        - name: redis-sock
+          persistentVolumeClaim:
+            claimName: redis-pvc-0
+      restartPolicy: Always
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+status: {}

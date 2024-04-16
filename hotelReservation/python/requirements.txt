@@ -1,0 +1,17 @@
+python-consul==1.1.0
+grpcio==1.62.1
+grpcio_opentracing==1.1.4
+jaeger_client==4.8.0
+opentracing==2.4.0
+protobuf>=3.6.1
+redis==5.0.3
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-exporter-jaeger==1.21.0
+# opentelemetry-sdk-extension-auto-instrumentation
+opentelemetry-semantic-conventions==0.45b0
+opentelemetry-instrumentation-grpc
+transformers
+torch
+sentencepiece
+cpm_kernels

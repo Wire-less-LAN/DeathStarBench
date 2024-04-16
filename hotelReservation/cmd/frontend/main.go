@@ -18,6 +18,7 @@ import (
 
 func main() {
 	tune.Init()
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}).With().Timestamp().Caller().Logger()
 
 	log.Info().Msg("Reading config...")

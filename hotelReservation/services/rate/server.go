@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/rate/proto"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/opentracing/opentracing-go"
@@ -63,22 +63,34 @@ func (s *Server) Run() error {
 		opts = append(opts, tlsopt)
 	}
 
-	srv := grpc.NewServer(opts...)
-
-	pb.RegisterRateServer(srv, s)
-
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		log.Fatal().Msgf("failed to listen: %v", err)
+	hrs := unicomm.HRServer[pb.RateServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/rate.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterRateServer,
+		Server:     s,
 	}
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	return hrs.RunServers(opts...)
+	// srv := grpc.NewServer(opts...)
 
-	return srv.Serve(lis)
+	// pb.RegisterRateServer(srv, s)
+
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	log.Fatal().Msgf("failed to listen: %v", err)
+	// }
+
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
+
+	// return srv.Serve(lis)
 }
 
 // Shutdown cleans up any processes
@@ -125,6 +137,7 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 			delete(rateMap, hotelId)
 		}
 
+		seen := make(map[string]bool)
 		wg.Add(len(rateMap))
 		for hotelId := range rateMap {
 			go func(id string) {
@@ -136,7 +149,8 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 
 				// memcached miss, set up mongo connection
 				collection := s.MongoClient.Database("rate-db").Collection("inventory")
-				curr, err := collection.Find(context.TODO(), bson.D{})
+				// why this left empty??? curr, err := collection.Find(context.TODO(), bson.D{})
+				curr, err := collection.Find(context.TODO(), bson.D{{"hotelId", id}})
 				if err != nil {
 					log.Error().Msgf("Failed get rate data: ", err)
 				}
@@ -154,14 +168,19 @@ func (s *Server) GetRates(ctx context.Context, req *pb.Request) (*pb.Result, err
 					log.Panic().Msgf("Tried to find hotelId [%v], but got error", id, err.Error())
 				} else {
 					for _, r := range tmpRatePlans {
-						mutex.Lock()
-						ratePlans = append(ratePlans, r)
-						mutex.Unlock()
-						rateJson, err := json.Marshal(r)
-						if err != nil {
-							log.Error().Msgf("Failed to marshal plan [Code: %v] with error: %s", r.Code, err)
+						if _, ok := seen[r.HotelId]; !ok {
+							seen[r.HotelId] = true
+
+							mutex.Lock()
+							ratePlans = append(ratePlans, r)
+							mutex.Unlock()
+
+							rateJson, err := json.Marshal(r)
+							if err != nil {
+								log.Error().Msgf("Failed to marshal plan [Code: %v] with error: %s", r.Code, err)
+							}
+							memcStr = memcStr + string(rateJson) + "\n"
 						}
-						memcStr = memcStr + string(rateJson) + "\n"
 					}
 				}
 				go s.MemcClient.Set(&memcache.Item{Key: id, Value: []byte(memcStr)})

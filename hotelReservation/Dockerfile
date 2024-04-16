@@ -1,4 +1,4 @@
-FROM golang:1.21 as builder
+FROM golang:1.22 as builder
 
 WORKDIR /workspace
 
@@ -14,12 +14,25 @@ COPY tls/ tls/
 COPY tracing/ tracing/
 COPY tune/ tune/
 
+COPY unicomm/ unicomm/
+
+COPY config.json config.json
+
 RUN CGO_ENABLED=0 GOOS=linux GO111MODULE=on go install -ldflags="-s -w" -mod=vendor ./cmd/...
 
-FROM gcr.io/distroless/static:nonroot
+# busybox 阶段
+FROM busybox as bb
+
+RUN /bin/busybox --help 
+
+# 最终镜像
+
+# FROM gcr.io/distroless/static:nonroot
+FROM ubuntu:latest
 
 WORKDIR /
 
+# 从构建阶段复制可执行文件
 COPY --from=builder /go/bin/frontend .
 COPY --from=builder /go/bin/geo .
 COPY --from=builder /go/bin/profile .
@@ -28,3 +41,11 @@ COPY --from=builder /go/bin/recommendation .
 COPY --from=builder /go/bin/reservation .
 COPY --from=builder /go/bin/search .
 COPY --from=builder /go/bin/user .
+
+# 从构建阶段复制配置和工具
+COPY --from=builder /workspace/config.json .
+COPY --from=bb /bin/busybox /bin/busybox
+
+RUN apt-get update && apt-get install -y redis-tools
+RUN /bin/busybox --help
+

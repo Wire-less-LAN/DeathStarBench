@@ -28,7 +28,8 @@ spec:
       containers:
         - command:
             - ./frontend
-          image: deathstarbench/hotel-reservation:latest
+          image: deathstarbench/hotel-reservation:static
+          imagePullPolicy: Never
           name: hotel-reserv-frontend
           ports:
             - containerPort: 5000
@@ -37,5 +38,17 @@ spec:
               cpu: 100m
             limits:
               cpu: 1000m
+          volumeMounts:
+          - name: sock-volume
+            mountPath: /var/run/hrsock
+          - name: redis-sock
+            mountPath: /var/run/redis
+      volumes:
+        - name: sock-volume
+          persistentVolumeClaim:
+            claimName: hrsock-pvc-0
+        - name: redis-sock
+          persistentVolumeClaim:
+            claimName: redis-pvc-0
       restartPolicy: Always
 status: {}

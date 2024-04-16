@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/profile/proto"
-	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/opentracing/opentracing-go"
@@ -59,26 +58,38 @@ func (s *Server) Run() error {
 		),
 	}
 
-	if tlsopt := tls.GetServerOpt(); tlsopt != nil {
-		opts = append(opts, tlsopt)
+	hrs := unicomm.HRServer[pb.ProfileServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/profile.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterProfileServer,
+		Server:     s,
 	}
 
-	srv := grpc.NewServer(opts...)
+	return hrs.RunServers(opts...)
+	// if tlsopt := tls.GetServerOpt(); tlsopt != nil {
+	// 	opts = append(opts, tlsopt)
+	// }
 
-	pb.RegisterProfileServer(srv, s)
+	// srv := grpc.NewServer(opts...)
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		log.Fatal().Msgf("failed to configure listener: %v", err)
-	}
+	// pb.RegisterProfileServer(srv, s)
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	log.Fatal().Msgf("failed to configure listener: %v", err)
+	// }
 
-	return srv.Serve(lis)
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
+
+	// return srv.Serve(lis)
 }
 
 // Shutdown cleans up any processes

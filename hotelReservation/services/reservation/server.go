@@ -3,7 +3,6 @@ package reservation
 import (
 	"context"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/reservation/proto"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/opentracing/opentracing-go"
@@ -62,24 +62,36 @@ func (s *Server) Run() error {
 		opts = append(opts, tlsopt)
 	}
 
-	srv := grpc.NewServer(opts...)
-
-	pb.RegisterReservationServer(srv, s)
-
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		log.Fatal().Msgf("failed to listen: %v", err)
+	hrs := unicomm.HRServer[pb.ReservationServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/reservation.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterReservationServer,
+		Server:     s,
 	}
 
-	log.Trace().Msgf("In reservation s.IpAddr = %s, port = %d", s.IpAddr, s.Port)
+	return hrs.RunServers(opts...)
+	// srv := grpc.NewServer(opts...)
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	// pb.RegisterReservationServer(srv, s)
 
-	return srv.Serve(lis)
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	log.Fatal().Msgf("failed to listen: %v", err)
+	// }
+
+	// log.Trace().Msgf("In reservation s.IpAddr = %s, port = %d", s.IpAddr, s.Port)
+
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
+
+	// return srv.Serve(lis)
 }
 
 // Shutdown cleans up any processes
@@ -290,18 +302,19 @@ func (s *Server) CheckAvailability(ctx context.Context, req *pb.Request) (*pb.Re
 		outDate, _ := time.Parse(
 			time.RFC3339,
 			req.OutDate+"T12:00:00+00:00")
-		for inDate.Before(outDate) {
-			indate := inDate.String()[:10]
-			inDate = inDate.AddDate(0, 0, 1)
-			outDate := inDate.String()[:10]
-			memcKey := hotelId + "_" + outDate + "_" + outDate
-			reqCommand = append(reqCommand, memcKey)
-			queryMap[memcKey] = map[string]string{
-				"hotelId":   hotelId,
-				"startDate": indate,
-				"endDate":   outDate,
-			}
+		// what's the point of this for loop?
+		// for inDate.Before(outDate) {
+		indate := inDate.String()[:10]
+		outdate := outDate.String()[:10]
+		memcKey := hotelId + "_" + indate + "_" + outdate
+		reqCommand = append(reqCommand, memcKey)
+		queryMap[memcKey] = map[string]string{
+			"hotelId":   hotelId,
+			"startDate": indate,
+			"endDate":   outdate,
 		}
+		// }
+
 	}
 
 	type taskRes struct {

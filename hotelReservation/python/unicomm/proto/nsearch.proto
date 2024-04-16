@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+service NSearch {
+  rpc Query(NSRequest) returns (NSResult);
+}
+
+message NSRequest {
+  string prompt = 1;
+}
+
+message NSResult {
+  string new_prompt = 1;
+}

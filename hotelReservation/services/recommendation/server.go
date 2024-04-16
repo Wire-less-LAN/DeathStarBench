@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/recommendation/proto"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	"github.com/hailocab/go-geoindex"
@@ -62,22 +62,34 @@ func (s *Server) Run() error {
 		opts = append(opts, tlsopt)
 	}
 
-	srv := grpc.NewServer(opts...)
-
-	pb.RegisterRecommendationServer(srv, s)
-
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		log.Fatal().Msgf("failed to listen: %v", err)
+	hrs := unicomm.HRServer[pb.RecommendationServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/recommendation.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterRecommendationServer,
+		Server:     s,
 	}
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	return hrs.RunServers(opts...)
+	// srv := grpc.NewServer(opts...)
 
-	return srv.Serve(lis)
+	// pb.RegisterRecommendationServer(srv, s)
+
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	log.Fatal().Msgf("failed to listen: %v", err)
+	// }
+
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
+
+	// return srv.Serve(lis)
 }
 
 // Shutdown cleans up any processes

@@ -2,6 +2,8 @@ package dialer
 
 import (
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
@@ -55,6 +57,15 @@ func Dial(name string, opts ...DialOption) (*grpc.ClientConn, error) {
 			return nil, fmt.Errorf("config error: %v", err)
 		}
 		dialopts = append(dialopts, opt)
+	}
+
+	if strings.HasPrefix(name, "unix://") {
+		dialopts = append(dialopts, grpc.WithDialer(
+			func(addr string, timeout time.Duration) (net.Conn, error) {
+				return net.DialTimeout("unix", addr, timeout)
+			},
+		))
+		name = strings.TrimPrefix(name, "unix://")
 	}
 
 	conn, err := grpc.Dial(name, dialopts...)

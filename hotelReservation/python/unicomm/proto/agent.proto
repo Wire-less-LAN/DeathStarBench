@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+service Agent {
+  rpc Query(AgentRequest) returns (AgentResult);
+}
+
+message AgentRequest {
+  string prompt = 1;
+}
+
+message AgentResult {
+  string new_prompt = 1;
+}

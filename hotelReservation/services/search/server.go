@@ -3,8 +3,9 @@ package search
 import (
 	// "encoding/json"
 	"fmt"
+	"reflect"
+
 	// F"io/ioutil"
-	"net"
 
 	"github.com/rs/zerolog/log"
 
@@ -16,7 +17,7 @@ import (
 	geo "github.com/delimitrou/DeathStarBench/hotelreservation/services/geo/proto"
 	rate "github.com/delimitrou/DeathStarBench/hotelreservation/services/rate/proto"
 	pb "github.com/delimitrou/DeathStarBench/hotelreservation/services/search/proto"
-	"github.com/delimitrou/DeathStarBench/hotelreservation/tls"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	opentracing "github.com/opentracing/opentracing-go"
@@ -29,8 +30,10 @@ const name = "srv-search"
 
 // Server implments the search service
 type Server struct {
-	geoClient  geo.GeoClient
-	rateClient rate.RateClient
+	geoClient     geo.GeoClient
+	uniGeoClient  unicomm.UniClient
+	rateClient    rate.RateClient
+	uniRateClient unicomm.UniClient
 
 	Tracer     opentracing.Tracer
 	Port       int
@@ -60,27 +63,35 @@ func (s *Server) Run() error {
 		),
 	}
 
-	if tlsopt := tls.GetServerOpt(); tlsopt != nil {
-		opts = append(opts, tlsopt)
-	}
-
-	srv := grpc.NewServer(opts...)
-	pb.RegisterSearchServer(srv, s)
-
-	// init grpc clients
-	if err := s.initGeoClient("srv-geo"); err != nil {
+	/* init grpc clients */
+	// if err := s.initGeoClient("srv-geo"); err != nil {
+	// 	return err
+	// }
+	err := *new(error)
+	if s.uniGeoClient, err = unicomm.InitUniClient("search", "geo", "srv-geo", "/geo.Geo/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
 		return err
 	}
-	if err := s.initRateClient("srv-rate"); err != nil {
+	// if err := s.initRateClient("srv-rate"); err != nil {
+	// 	return err
+	// }
+	if s.uniRateClient, err = unicomm.InitUniClient("search", "rate", "srv-rate", "/rate.Rate/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
 		return err
 	}
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
-	if err != nil {
-		log.Fatal().Msgf("failed to listen: %v", err)
-	}
+	/* start servers */
+	// if tlsopt := tls.GetServerOpt(); tlsopt != nil {
+	// 	opts = append(opts, tlsopt)
+	// }
 
-	// register with consul
+	// srv := grpc.NewServer(opts...)
+	// pb.RegisterSearchServer(srv, s)
+
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+	// if err != nil {
+	// 	log.Fatal().Msgf("failed to listen: %v", err)
+	// }
+
+	/* register on consul */
 	// jsonFile, err := os.Open("config.json")
 	// if err != nil {
 	// 	fmt.Println(err)
@@ -93,13 +104,24 @@ func (s *Server) Run() error {
 	// var result map[string]string
 	// json.Unmarshal([]byte(byteValue), &result)
 
-	err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
-	if err != nil {
-		return fmt.Errorf("failed register: %v", err)
-	}
-	log.Info().Msg("Successfully registered in consul")
+	// err = s.Registry.Register(name, s.uuid, s.IpAddr, s.Port)
+	// if err != nil {
+	// 	return fmt.Errorf("failed register: %v", err)
+	// }
+	// log.Info().Msg("Successfully registered in consul")
 
-	return srv.Serve(lis)
+	hrs := unicomm.HRServer[pb.SearchServer]{
+		Name:       name,
+		Uuid:       s.uuid,
+		Port:       s.Port,
+		IpAddr:     s.IpAddr,
+		SocketPath: "var/run/hrsock/search.sock",
+		Registry:   s.Registry,
+		Register:   pb.RegisterSearchServer,
+		Server:     s,
+	}
+
+	return hrs.RunServers(opts...)
 }
 
 // Shutdown cleans up any processes
@@ -113,6 +135,7 @@ func (s *Server) initGeoClient(name string) error {
 		return fmt.Errorf("dialer error: %v", err)
 	}
 	s.geoClient = geo.NewGeoClient(conn)
+
 	return nil
 }
 
@@ -122,6 +145,7 @@ func (s *Server) initRateClient(name string) error {
 		return fmt.Errorf("dialer error: %v", err)
 	}
 	s.rateClient = rate.NewRateClient(conn)
+
 	return nil
 }
 
@@ -147,12 +171,21 @@ func (s *Server) Nearby(ctx context.Context, req *pb.NearbyRequest) (*pb.SearchR
 	log.Trace().Msgf("nearby lat = %f", req.Lat)
 	log.Trace().Msgf("nearby lon = %f", req.Lon)
 
-	nearby, err := s.geoClient.Nearby(ctx, &geo.Request{
+	// nearby, err := s.geoClient.Nearby(ctx, &geo.Request{
+	// 	Lat: req.Lat,
+	// 	Lon: req.Lon,
+	// })
+	tmp, err := s.uniGeoClient.Call(ctx, "Nearby", &geo.Request{
 		Lat: req.Lat,
 		Lon: req.Lon,
-	})
+	}, reflect.TypeFor[geo.Result]())
 	if err != nil {
 		return nil, err
+	}
+	nearby, ok := tmp.(*geo.Result)
+	if !ok {
+		log.Error().Msg("failed to convert geo.Nearby's resp")
+		return nil, fmt.Errorf("failed to convert geo.Nearby's resp")
 	}
 
 	for _, hid := range nearby.HotelIds {
@@ -160,13 +193,23 @@ func (s *Server) Nearby(ctx context.Context, req *pb.NearbyRequest) (*pb.SearchR
 	}
 
 	// find rates for hotels
-	rates, err := s.rateClient.GetRates(ctx, &rate.Request{
+	// rates, err := s.rateClient.GetRates(ctx, &rate.Request{
+	// 	HotelIds: nearby.HotelIds,
+	// 	InDate:   req.InDate,
+	// 	OutDate:  req.OutDate,
+	// })
+	tmp, err = s.uniRateClient.Call(ctx, "GetRates", &rate.Request{
 		HotelIds: nearby.HotelIds,
 		InDate:   req.InDate,
 		OutDate:  req.OutDate,
-	})
+	}, reflect.TypeFor[rate.Result]())
 	if err != nil {
 		return nil, err
+	}
+	rates, ok := tmp.(*rate.Result)
+	if !ok {
+		log.Error().Msg("failed to convert rate.GetRates resp")
+		return nil, fmt.Errorf("failed to convert rate.GetRates resp")
 	}
 
 	// TODO(hw): add simple ranking algo to order hotel ids:

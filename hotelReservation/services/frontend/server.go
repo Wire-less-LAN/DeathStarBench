@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 
 	"google.golang.org/grpc"
@@ -11,6 +12,7 @@ import (
 	recommendation "github.com/delimitrou/DeathStarBench/hotelreservation/services/recommendation/proto"
 	reservation "github.com/delimitrou/DeathStarBench/hotelreservation/services/reservation/proto"
 	user "github.com/delimitrou/DeathStarBench/hotelreservation/services/user/proto"
+	"github.com/delimitrou/DeathStarBench/hotelreservation/unicomm"
 	"github.com/rs/zerolog/log"
 
 	"github.com/delimitrou/DeathStarBench/hotelreservation/dialer"
@@ -24,16 +26,21 @@ import (
 
 // Server implements frontend service
 type Server struct {
-	searchClient         search.SearchClient
-	profileClient        profile.ProfileClient
-	recommendationClient recommendation.RecommendationClient
-	userClient           user.UserClient
-	reservationClient    reservation.ReservationClient
-	KnativeDns           string
-	IpAddr               string
-	Port                 int
-	Tracer               opentracing.Tracer
-	Registry             *registry.Client
+	searchClient            search.SearchClient
+	uniSearchClient         unicomm.UniClient
+	profileClient           profile.ProfileClient
+	uniProfileClient        unicomm.UniClient
+	recommendationClient    recommendation.RecommendationClient
+	uniRecommendationClient unicomm.UniClient
+	userClient              user.UserClient
+	uniUserClient           unicomm.UniClient
+	reservationClient       reservation.ReservationClient
+	uniReservationClient    unicomm.UniClient
+	KnativeDns              string
+	IpAddr                  string
+	Port                    int
+	Tracer                  opentracing.Tracer
+	Registry                *registry.Client
 }
 
 // Run the server
@@ -43,25 +50,38 @@ func (s *Server) Run() error {
 	}
 
 	log.Info().Msg("Initializing gRPC clients...")
-	if err := s.initSearchClient("srv-search"); err != nil {
+	err := *new(error)
+	if s.uniSearchClient, err = unicomm.InitUniClient("frontend", "search", "srv-search", "/search.Search/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
+		return err
+	}
+	if s.uniProfileClient, err = unicomm.InitUniClient("frontend", "profile", "srv-profile", "/profile.Profile/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
+		return err
+	}
+	if s.uniRecommendationClient, err = unicomm.InitUniClient("frontend", "recommendation", "srv-recommendation", "/recommendation.Recommendation/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
+		return err
+	}
+	if s.uniUserClient, err = unicomm.InitUniClient("frontend", "user", "srv-user", "/user.User/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
+		return err
+	}
+	if s.uniReservationClient, err = unicomm.InitUniClient("frontend", "reservation", "srv-reservation", "/reservation.Reservation/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
 		return err
 	}
 
-	if err := s.initProfileClient("srv-profile"); err != nil {
-		return err
-	}
+	// if err := s.initProfileClient("srv-profile"); err != nil {
+	// 	return err
+	// }
 
-	if err := s.initRecommendationClient("srv-recommendation"); err != nil {
-		return err
-	}
+	// if err := s.initRecommendationClient("srv-recommendation"); err != nil {
+	// 	return err
+	// }
 
-	if err := s.initUserClient("srv-user"); err != nil {
-		return err
-	}
+	// if err := s.initUserClient("srv-user"); err != nil {
+	// 	return err
+	// }
 
-	if err := s.initReservation("srv-reservation"); err != nil {
-		return err
-	}
+	// if err := s.initReservation("srv-reservation"); err != nil {
+	// 	return err
+	// }
 	log.Info().Msg("Successfull")
 
 	log.Trace().Msg("frontend before mux")
@@ -179,19 +199,32 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 	log.Trace().Msg("starts searchHandler querying downstream")
 
 	log.Trace().Msgf("SEARCH [lat: %v, lon: %v, inDate: %v, outDate: %v", lat, lon, inDate, outDate)
-	// search for best hotels
-	searchResp, err := s.searchClient.Nearby(ctx, &search.NearbyRequest{
+	//search for best hotels
+	// searchResp, err := s.searchClient.Nearby(ctx, &search.NearbyRequest{
+	// 	Lat:     lat,
+	// 	Lon:     lon,
+	// 	InDate:  inDate,
+	// 	OutDate: outDate,
+	// })
+	tmp, err := s.uniSearchClient.Call(ctx, "Nearby", &search.NearbyRequest{
 		Lat:     lat,
 		Lon:     lon,
 		InDate:  inDate,
 		OutDate: outDate,
-	})
+	}, reflect.TypeFor[search.SearchResult]())
 	if err != nil {
+		log.Error().Msgf("Search.Nearby failed: %s", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	searchResp, ok := tmp.(*search.SearchResult)
+	if !ok {
+		log.Error().Msgf("failed to convert search.Nearby's resp")
+		http.Error(w, "failed to convert search.Nearby's resp", http.StatusInternalServerError)
+		return
+	}
 
-	log.Trace().Msg("SearchHandler gets searchResp")
+	log.Info().Msg("SearchHandler gets searchResp")
 	//for _, hid := range searchResp.HotelIds {
 	//	log.Trace().Msgf("Search Handler hotelId = %s", hid)
 	//}
@@ -202,30 +235,54 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 		locale = "en"
 	}
 
-	reservationResp, err := s.reservationClient.CheckAvailability(ctx, &reservation.Request{
+	// reservationResp, err := s.reservationClient.CheckAvailability(ctx, &reservation.Request{
+	// 	CustomerName: "",
+	// 	HotelId:      searchResp.HotelIds,
+	// 	InDate:       inDate,
+	// 	OutDate:      outDate,
+	// 	RoomNumber:   1,
+	// })
+	tmp, err = s.uniReservationClient.Call(ctx, "CheckAvailability", &reservation.Request{
 		CustomerName: "",
 		HotelId:      searchResp.HotelIds,
 		InDate:       inDate,
 		OutDate:      outDate,
 		RoomNumber:   1,
-	})
+	}, reflect.TypeFor[reservation.Result]())
 	if err != nil {
 		log.Error().Msg("SearchHandler CheckAvailability failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	reservationResp, ok := tmp.(*reservation.Result)
+	if !ok {
+		log.Error().Msg("failed to convert reservation.CheckAvailability's resp")
+		http.Error(w, "failed to convert reservation.CheckAvailability's resp", http.StatusInternalServerError)
+		return
+
 	}
 
 	log.Trace().Msgf("searchHandler gets reserveResp")
 	log.Trace().Msgf("searchHandler gets reserveResp.HotelId = %s", reservationResp.HotelId)
 
 	// hotel profiles
-	profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+	// profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+	// 	HotelIds: reservationResp.HotelId,
+	// 	Locale:   locale,
+	// })
+	tmp, err = s.uniProfileClient.Call(ctx, "GetProfiles", &profile.Request{
 		HotelIds: reservationResp.HotelId,
 		Locale:   locale,
-	})
+	}, reflect.TypeFor[profile.Result]())
 	if err != nil {
 		log.Error().Msg("SearchHandler GetProfiles failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	profileResp, ok := tmp.(*profile.Result)
+	if !ok {
+		log.Error().Msg("failed to convert profile.GetProfiles' resp")
+		http.Error(w, "failed to convert profile.GetProfiles' resp", http.StatusInternalServerError)
 		return
 	}
 
@@ -255,13 +312,25 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// recommend hotels
-	recResp, err := s.recommendationClient.GetRecommendations(ctx, &recommendation.Request{
+	// recResp, err := s.recommendationClient.GetRecommendations(ctx, &recommendation.Request{
+	// 	Require: require,
+	// 	Lat:     float64(lat),
+	// 	Lon:     float64(lon),
+	// })
+	tmp, err := s.uniRecommendationClient.Call(ctx, "GetRecommendations", &recommendation.Request{
 		Require: require,
 		Lat:     float64(lat),
 		Lon:     float64(lon),
-	})
+	}, reflect.TypeFor[recommendation.Result]())
 	if err != nil {
+		log.Error().Msg("RecommendHandler GetRecommendations failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recResp, ok := tmp.(*recommendation.Result)
+	if !ok {
+		log.Error().Msg("failed to convert recommendation.GetRecommendations' resp")
+		http.Error(w, "failed to convert recommendation.GetRecommendations' resp", http.StatusInternalServerError)
 		return
 	}
 
@@ -272,12 +341,23 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// hotel profiles
-	profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+	// profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+	// 	HotelIds: recResp.HotelIds,
+	// 	Locale:   locale,
+	// })
+	tmp, err = s.uniProfileClient.Call(ctx, "GetProfiles", &profile.Request{
 		HotelIds: recResp.HotelIds,
 		Locale:   locale,
-	})
+	}, reflect.TypeFor[profile.Result]())
 	if err != nil {
+		log.Error().Msg("RecommendHandler GetProfiles failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	profileResp, ok := tmp.(*profile.Result)
+	if !ok {
+		log.Error().Msg("failed to convert profile.GetProfiles' resp")
+		http.Error(w, "failed to convert profile.GetProfiles' resp", http.StatusInternalServerError)
 		return
 	}
 
@@ -295,17 +375,28 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check username and password
-	recResp, err := s.userClient.CheckUser(ctx, &user.Request{
+	// recResp, err := s.userClient.CheckUser(ctx, &user.Request{
+	// 	Username: username,
+	// 	Password: password,
+	// })
+	tmp, err := s.uniUserClient.Call(ctx, "CheckUser", &user.Request{
 		Username: username,
 		Password: password,
-	})
+	}, reflect.TypeFor[user.Result]())
 	if err != nil {
+		log.Error().Msg("UserHandler CheckUser failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recResp, ok := tmp.(*user.Result)
+	if !ok {
+		log.Error().Msg("failed to convert user.CheckUser resp")
+		http.Error(w, "failed to convert user.CheckUser resp", http.StatusInternalServerError)
 		return
 	}
 
 	str := "Login successfully!"
-	if recResp.Correct == false {
+	if !recResp.Correct {
 		str = "Failed. Please check your username and password. "
 	}
 
@@ -356,32 +447,56 @@ func (s *Server) reservationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check username and password
-	recResp, err := s.userClient.CheckUser(ctx, &user.Request{
+	tmp, err := s.uniUserClient.Call(ctx, "CheckUser", &user.Request{
 		Username: username,
 		Password: password,
-	})
+	}, reflect.TypeFor[user.Result]())
 	if err != nil {
+		log.Error().Msg("UserHandler CheckUser failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recResp, ok := tmp.(*user.Result)
+	if !ok {
+		log.Error().Msg("failed to convert user.CheckUser resp")
+		http.Error(w, "failed to convert user.CheckUser resp", http.StatusInternalServerError)
 		return
 	}
 
 	str := "Reserve successfully!"
-	if recResp.Correct == false {
+	if !recResp.Correct {
 		str = "Failed. Please check your username and password. "
 	}
 
 	// Make reservation
-	resResp, err := s.reservationClient.MakeReservation(ctx, &reservation.Request{
+	tmp, err = s.uniReservationClient.Call(ctx, "MakeReservation", &reservation.Request{
 		CustomerName: customerName,
 		HotelId:      []string{hotelId},
 		InDate:       inDate,
 		OutDate:      outDate,
 		RoomNumber:   int32(numberOfRoom),
-	})
+	}, reflect.TypeFor[reservation.Result]())
 	if err != nil {
+		log.Error().Msg("reservationHandler MakeReservation failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	resResp, ok := tmp.(*reservation.Result)
+	if !ok {
+		log.Error().Msg("failed to convert reservation.MakeReservation resp")
+		http.Error(w, "failed to convert reservation.MakeReservation resp", http.StatusInternalServerError)
+		return
+
+	}
+
+	// resResp, err := s.reservationClient.MakeReservation(ctx, &reservation.Request{
+	// 	CustomerName: customerName,
+	// 	HotelId:      []string{hotelId},
+	// 	InDate:       inDate,
+	// 	OutDate:      outDate,
+	// 	RoomNumber:   int32(numberOfRoom),
+	// })
+
 	if len(resResp.HotelId) == 0 {
 		str = "Failed. Already reserved. "
 	}
