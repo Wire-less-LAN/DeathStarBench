@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import nsearch_pb2 as nsearch__pb2
+from . import nsearch_pb2 as nsearch__pb2
 
 
 class NSearchStub(object):

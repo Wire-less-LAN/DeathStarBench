@@ -27,12 +27,12 @@ spec:
     spec:
       containers:
         - command:
-          # - python
-          # args:
-          # - /retriever/main.py
-            - sleep
+          - python3
           args:
-            - infinity
+          - /retriever/main.py
+          #   - sleep
+          # args:
+          #   - infinity
           image: anliu/hr-agents:static
           imagePullPolicy: Never
           name: hotel-reserv-retriever

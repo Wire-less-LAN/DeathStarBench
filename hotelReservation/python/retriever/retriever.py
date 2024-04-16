@@ -21,7 +21,7 @@ import torch
 
 
 class Server:
-    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, agent_rank, nsearch_rank) -> None:
+    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, agent_rank, nsearch_rank, agent_workers, nsearch_workers) -> None:
         self.tracer = tracer
         self.port = port
         self.ip_addr = ip_addr
@@ -29,7 +29,9 @@ class Server:
         self.registry = registry
         self.model_path = model_path
         self.agent_rank = agent_rank
+        self.agent_workers = agent_workers
         self.nsearch_rank = nsearch_rank
+        self.nsearch_workers = nsearch_workers
         pass
 
     def Query(self, prompt, context):
@@ -92,7 +94,7 @@ class Server:
             prompt += str(resp.ratePlans)
 
             resp = self.recommendation_client.pseudo_req()
-            print("Pseudo rocommendation resp:", resp.HotelIds)
+            print("Pseudo recommendation resp:", resp.HotelIds)
             prompt += str(resp.HotelIds)
 
             inputs = self.tokenizer.encode(prompt, return_tensors="pt").cuda()
@@ -124,8 +126,8 @@ class Server:
         self.rate_client = unicomm.RateClient("retriever")
         self.recommendation_client = unicomm.RecommendationClient("retriever")
 
-        self.nsearch_client = unicomm.NSearchClient("retriever", self.nsearch_rank)
-        self.agent_client = unicomm.AgentClient("retriever", self.agent_rank)
+        self.nsearch_client = unicomm.NSearchClient("retriever", self.nsearch_rank, self.nsearch_workers)
+        self.agent_client = unicomm.AgentClient("retriever", self.agent_rank, self.agent_workers)
 
         GrpcInstrumentorClient().instrument()
         opts = [

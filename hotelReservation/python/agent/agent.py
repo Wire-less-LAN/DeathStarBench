@@ -26,7 +26,7 @@ import torch.distributed as dist
 
 
 class Server:
-    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, retriever_rank) -> None:
+    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, retriever_rank, workers) -> None:
         self.tracer = tracer
         self.port = port
         self.ip_addr = ip_addr
@@ -34,6 +34,7 @@ class Server:
         self.registry = registry
         self.model_path = model_path
         self.retriever_rank = retriever_rank
+        self.workers = workers
 
     def Query(self, prompt, context):
         try:
@@ -52,13 +53,13 @@ class Server:
             print("Error Query:", e)
             traceback.print_exc()
 
-    def run_pseudo_p2p_server(self, src):
+    def run_pseudo_p2p_server(self, src, tag):
         while True:
             tensor = torch.zeros([500, 1], dtype=torch.long).cuda()
-            dist.recv(tensor=tensor, src=src)
+            dist.recv(tensor=tensor, src=src, tag=tag)
             outputs = self.model.generate(self.hello_inputs, max_length=100, num_return_sequences=1)
-            tensor = torch.rand([500, 1], dtype=torch.long).cuda()
-            dist.send(tensor=tensor, dst=src)
+            tensor = unicomm.get_rand_tensor()
+            dist.send(tensor=tensor, dst=src, tag=tag)
 
     def run_p2p_server(self, src):
         while True:
@@ -109,8 +110,8 @@ class Server:
 
 
         threads = []
-        for i in range(16):
-            t = threading.Thread(target=self.run_p2p_server, args=[self.retriever_rank])
+        for i in range(self.workers):
+            t = threading.Thread(target=self.run_pseudo_p2p_server, args=[self.retriever_rank, i])
             t.start()
             threads.append(t)
         hrs.run_servers(opts)

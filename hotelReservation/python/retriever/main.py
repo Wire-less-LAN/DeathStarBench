@@ -4,7 +4,6 @@ import argparse
 import traceback
 import os
 import logging
-from DeathStarBench.hotelReservation.python import nsearch
 import retriever
 from jaeger_client.config import Config
 
@@ -80,7 +79,9 @@ def main():
     world_size = int(config["WorldSize"])
     rank = int(config["RetrieverRank"])
     agent_rank = int(config["AgentRank"])
+    agent_workers = int(config["MaxAgentWorkers"])
     nsearch_rank = int(config["NSearchRank"])
+    nsearch_workers = int(config["MaxNSearchWorkers"])
 
     unicomm.init_process(master_addr, master_port, rank, world_size)
     
@@ -114,7 +115,9 @@ def main():
         registry=registry_client,
         model_path="/chatglm3-6b",
         agent_rank=agent_rank,
-        nsearch_rank=nsearch_rank
+        nsearch_rank=nsearch_rank,
+        agent_workers=agent_workers,
+        nsearch_workers=nsearch_workers
     )
 
     logging.info("Starting server...")

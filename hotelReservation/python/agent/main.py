@@ -79,6 +79,7 @@ def main():
     world_size = int(config["WorldSize"])
     rank = int(config["AgentRank"])
     retriever_rank = int(config["RetrieverRank"])
+    agent_workers = int(config["MaxAgentWorkers"])
 
     unicomm.init_process(master_addr, master_port, rank, world_size)
     
@@ -111,7 +112,8 @@ def main():
         knative_dns=knative_dns,
         registry=registry_client,
         model_path="/chatglm3-6b",
-        retriever_rank = retriever_rank
+        retriever_rank = retriever_rank,
+        workers=agent_workers
     )
 
     logging.info("Starting server...")

@@ -22,10 +22,14 @@
 
   "RetrieverPort": "8088",
   "RetrieverRank": "0",
+
   "AgentPort": "8089",
   "AgentRank": "1",
+  "MaxAgentWorkers": "16",
   "NSearchPort": "8090",
   "NSearchRank": "2",
+  "MaxNSearchWorkers": "16",
+
   "MasterAddr": "retriever",
   "MasterPort": "8888",
   "WorldSize": "3"

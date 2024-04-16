@@ -29,7 +29,12 @@ import os
 import torch
 import torch.distributed as dist
 
+import threading
+
 from unicomm.proto import geo_pb2 as geo, geo_pb2_grpc as geo_grpc, rate_pb2 as rate, rate_pb2_grpc as rate_grpc, recommendation_pb2 as recommendation, recommendation_pb2_grpc as recommendation_grpc, agent_pb2 as agent, agent_pb2_grpc as agent_grpc, nsearch_pb2 as nsearch, nsearch_pb2_grpc as nsearch_grpc
+
+def get_rand_tensor():
+    return torch.randint(0, 32766, (500, 1), dtype=torch.long).cuda()
 
 def setup_tracer_provider(service_name, ratio, host):
     resource = Resource(attributes={
@@ -234,8 +239,19 @@ def init_process(master_addr, master_port, rank, size, backend='nccl'):
     os.environ['MASTER_PORT'] = master_port
     dist.init_process_group(backend, rank=rank, world_size=size)
 
+class ThreadSafeTag:
+    def __init__(self, max, value=0):
+        self.value = value
+        self.lock = threading.Lock()
+        self.max = max
+
+    def next(self):
+        with self.lock:
+           self.value = (self.value + 1) % self.max
+           return self.value
+
 class AgentClient:
-    def __init__(self, srv_name, dst):
+    def __init__(self, srv_name, dst, max_tag):
         self.srv_name = srv_name
         
         chan = grpc.insecure_channel("agent:8089", options)
@@ -244,6 +260,8 @@ class AgentClient:
         # self.unix_stub = agent_grpc.AgentStub(unix_chan)
 
         self.dst = dst
+
+        self.tag = ThreadSafeTag(max_tag)
 
     def Query(self, prompt_tensor, tokenizer, hello_outputs):
         comm_type = get_comm_type(self.srv_name, "agent")
@@ -270,10 +288,11 @@ class AgentClient:
             # tensor = torch.zeros(size=tuple(shape_tensor.tolist()), dtype=torch.long).cuda()
             # dist.recv(tensor=tensor, src=self.dst)
             # print("Recv tensor:", tensor)
-            tensor = torch.rand([500, 1], dtype=torch.long).cuda()
-            dist.send(tensor=tensor, dst=self.dst)
+            tag = self.tag.next()
+            tensor = get_rand_tensor()
+            dist.send(tensor=tensor, dst=self.dst, tag=tag)
 
-            dist.recv(tensor=tensor, src=self.dst)
+            dist.recv(tensor=tensor, src=self.dst, tag=tag)
 
             resp_str = tokenizer.decode(hello_outputs)
             resp = agent.AgentResult(new_prompt=resp_str)
@@ -281,7 +300,7 @@ class AgentClient:
             
 
 class NSearchClient:
-    def __init__(self, srv_name, dst):
+    def __init__(self, srv_name, dst, max_tag):
         self.srv_name = srv_name
         
         chan = grpc.insecure_channel("nsearch:8090", options)
@@ -290,6 +309,8 @@ class NSearchClient:
         # self.unix_stub = agent_grpc.AgentStub(unix_chan)
 
         self.dst = dst
+        
+        self.tag = ThreadSafeTag(max_tag)
 
     def Query(self, prompt_tensor, tokenizer, hello_outputs):
         comm_type = get_comm_type(self.srv_name, "nsearch")
@@ -316,10 +337,11 @@ class NSearchClient:
             # tensor = torch.zeros(size=tuple(shape_tensor.tolist()), dtype=torch.long).cuda()
             # dist.recv(tensor=tensor, src=self.dst)
             # print("Recv tensor:", tensor)
-            tensor = torch.rand([500, 1], dtype=torch.long).cuda()
-            dist.send(tensor=tensor, dst=self.dst)
+            tag = self.tag.next()
+            tensor = get_rand_tensor()
+            dist.send(tensor=tensor, dst=self.dst, tag=tag)
 
-            dist.recv(tensor=tensor, src=self.dst)
+            dist.recv(tensor=tensor, src=self.dst, tag=tag)
 
             resp_str = tokenizer.decode(hello_outputs)
             resp = nsearch.NSResult(new_prompt=resp_str)

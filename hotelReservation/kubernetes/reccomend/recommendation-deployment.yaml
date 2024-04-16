@@ -46,9 +46,9 @@ spec:
       volumes:
         - name: sock-volume
           persistentVolumeClaim:
-            claimName: hrsock-pvc
+            claimName: hrsock-pvc-0
         - name: redis-sock
           persistentVolumeClaim:
-            claimName: redis-pvc
+            claimName: redis-pvc-0
       restartPolicy: Always
 status: {}

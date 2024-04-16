@@ -4,7 +4,7 @@ import argparse
 import traceback
 import os
 import logging
-import DeathStarBench.hotelReservation.python.nsearch.nsearch as nsearch
+import nsearch
 from jaeger_client.config import Config
 
 import sys
@@ -79,6 +79,7 @@ def main():
     world_size = int(config["WorldSize"])
     rank = int(config["NSearchRank"])
     retriever_rank = int(config["RetrieverRank"])
+    nsearch_workers = int(config["MaxNSearchWorkers"])
 
     unicomm.init_process(master_addr, master_port, rank, world_size)
     
@@ -111,7 +112,8 @@ def main():
         knative_dns=knative_dns,
         registry=registry_client,
         model_path="/chatglm3-6b",
-        retriever_rank = retriever_rank
+        retriever_rank = retriever_rank,
+        workers=nsearch_workers
     )
 
     logging.info("Starting server...")
