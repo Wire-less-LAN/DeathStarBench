@@ -20,13 +20,13 @@ from unicomm.proto import agent_pb2 as pb, agent_pb2_grpc as pb_grpc
 import grpc
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
 
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, DistilBertModel, DistilBertTokenizer
 import torch
 import torch.distributed as dist
 
 
 class Server:
-    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, retriever_rank, workers) -> None:
+    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, retriever_rank, workers, bert_model_path, batch_size) -> None:
         self.tracer = tracer
         self.port = port
         self.ip_addr = ip_addr
@@ -36,52 +36,51 @@ class Server:
         self.retriever_rank = retriever_rank
         self.workers = workers
 
+        self.bert_model_path = bert_model_path
+        self.batch_size = batch_size        
+
     def Query(self, prompt, context):
         try:
             print("Got prompt:", prompt)
-
+            tag = prompt.tag
             prompt = prompt.prompt
+
+            input = self.tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=False).cuda()
+            self.receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
+            new_prompt = self.result_q.get(tag)
             
-            hello_inputs = self.tokenizer.encode("Hello", return_tensors="pt").cuda()
-            outputs = self.model.generate(hello_inputs, max_length=100, num_return_sequences=1)
-            prompt += self.tokenizer.decode(outputs[0])
-            
-            print("LLM resp: ", prompt)
-            
-            return pb.AgentResult(new_prompt=prompt)
+            return pb.AgentResult(new_prompt=prompt, tag=tag)
         except Exception as e:
             print("Error Query:", e)
             traceback.print_exc()
 
-    def run_pseudo_p2p_server(self, src, tag):
+    def pseudo_gen(self):
+        try:
+            logging.info("stacking")
+            input = {
+                "input_ids": torch.stack([self.bert_input['input_ids'][0]]*self.batch_size, dim=0),
+                "attention_mask": torch.stack([self.bert_input['attention_mask'][0]]*self.batch_size, dim=0),
+            }
+            logging.info("stacked")
+            self.model(**input)
+        except KeyboardInterrupt as e:
+            traceback.print_stack()
+            
+            
+    def run_gen(self, receiver, sender):
         while True:
-            tensor = torch.zeros([500, 1], dtype=torch.long).cuda()
-            dist.recv(tensor=tensor, src=src, tag=tag)
-            outputs = self.model.generate(self.hello_inputs, max_length=100, num_return_sequences=1)
-            tensor = unicomm.get_rand_tensor()
-            dist.send(tensor=tensor, dst=src, tag=tag)
+            msgs = receiver.pop()
+            logging.info("[RUNGEN] popped msgs")
+            self.pseudo_gen()
+            logging.info("[RUNGEN] generated")
+            sender.push(*msgs)
+            logging.info("[RUNGEN] pushed to sender")
 
-    def run_p2p_server(self, src):
+    def run_get_grpc_res(self, sender, result_q):
         while True:
-            print("Listening p2p tensor from src=", src)
-            shape_tensor = torch.zeros(2, dtype=torch.long).cuda()
-            dist.recv(tensor=shape_tensor, src=src)
-            print("P2P recv shape: ", shape_tensor.cpu())
-
-            tensor = torch.zeros(size=tuple(shape_tensor.tolist()), dtype=torch.long).cuda()
-            dist.recv(tensor=tensor, src=src)
-            print("P2P recv tensor: ", tensor.cpu())
-
-            outputs = self.model.generate(tensor, max_length=1000, num_return_sequences=1)
-            print("LLM resp:", outputs)
-
-            shape_tensor = torch.tensor(outputs[0].shape).cuda()
-            dist.send(tensor=shape_tensor, dst=src)
-            print("P2P resp shape: ", shape_tensor)
-            tensor = outputs[0].cuda()
-            dist.send(tensor=tensor, dst=src)
-            print("P2P resp: ", tensor)
-
+            msg = sender.grpc_get_msg()
+            prompt = self.tokenizer.decode(msg.tensor)
+            result_q.push(msg.tag, prompt)
 
     def run(self):
         if self.port == None:
@@ -89,10 +88,31 @@ class Server:
         self.uuid = str(uuid.uuid4())
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(self.model_path, trust_remote_code=True).quantize(4).cuda()
+        # self.model = AutoModel.from_pretrained(self.model_path, trust_remote_code=True).quantize(4).cuda()
+        self.model = DistilBertModel.from_pretrained(self.bert_model_path).to(torch.device("cuda"))
         self.model = self.model.eval()
 
-        self.hello_inputs = self.tokenizer.encode("Hello", return_tensors="pt").cuda()
+        # pseudo bert encoded input
+        bert_tokenizer = DistilBertTokenizer.from_pretrained(self.bert_model_path) 
+        self.bert_input = bert_tokenizer("Hello World! " * 100, return_tensors="pt").to(torch.device("cuda"))
+
+        self.receiver = unicomm.Receiver(self.batch_size) 
+        receive_p2p_thread = threading.Thread(target=self.receiver.listen_p2p, args=[self.retriever_rank])
+        receive_p2p_thread.start()
+    
+        self.sender = unicomm.Sender(self.batch_size)        
+        gen_thread = threading.Thread(target=self.run_gen, args=[self.receiver, self.sender])
+        gen_thread.start()
+
+        self.result_q = unicomm.ResultQueue(self.tokenizer)
+
+        
+        get_threads = [] 
+        # for i in range(10):
+        #     get_thread = threading.Thread(target=self.run_get_grpc_res, args=[self.sender, self.result_q])
+        #     get_threads.append(get_thread)
+        send_thread = threading.Thread(target=self.sender.send_p2p, args=[self.retriever_rank])
+        send_thread.start()
 
         GrpcInstrumentorClient().instrument()
         opts = [
@@ -109,28 +129,10 @@ class Server:
                                self)
 
 
-        threads = []
-        for i in range(self.workers):
-            t = threading.Thread(target=self.run_pseudo_p2p_server, args=[self.retriever_rank, i])
-            t.start()
-            threads.append(t)
         hrs.run_servers(opts)
-        for t in threads:
+
+        receive_p2p_thread.join()
+        gen_thread.join()
+        for t in get_threads:
             t.join()
-        # with concurrent.futures.ThreadPoolExecutor(max_workers=32*4) as executor:
-        #     future1 = executor.submit(hrs.run_servers, opts)
-        #     future2 = executor.submit(self.run_p2p_server, self.retriever_rank)
-
-        #     try:
-        #         done, not_done = concurrent.futures.wait(
-        #             [future1, future2], 
-        #             return_when=concurrent.futures.FIRST_COMPLETED,
-        #         )
-
-        #         for future in not_done:
-        #             future.cancel()
-        
-        #     except KeyboardInterrupt:
-        #         future1.cancel()
-        #         future2.cancel()
-
+        send_thread.join()

@@ -6,8 +6,10 @@ service NSearch {
 
 message NSRequest {
   string prompt = 1;
+  int64 tag = 2;
 }
 
 message NSResult {
   string new_prompt = 1;
+  int64 tag = 2;
 }

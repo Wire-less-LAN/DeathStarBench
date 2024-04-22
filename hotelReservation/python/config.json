@@ -25,10 +25,10 @@
 
   "AgentPort": "8089",
   "AgentRank": "1",
-  "MaxAgentWorkers": "16",
+  "MaxAgentWorkers": "1",
   "NSearchPort": "8090",
   "NSearchRank": "2",
-  "MaxNSearchWorkers": "16",
+  "MaxNSearchWorkers": "1",
 
   "MasterAddr": "retriever",
   "MasterPort": "8888",

@@ -16,118 +16,149 @@ from unicomm.proto import geo_pb2 as geo, geo_pb2_grpc as geo_grpc, rate_pb2 as 
 import grpc
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
 
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, DistilBertTokenizer, DistilBertModel
 import torch
 
+import threading
 
 class Server:
-    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, agent_rank, nsearch_rank, agent_workers, nsearch_workers) -> None:
+    def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, bert_model_path, agent_rank, nsearch_rank, agent_workers, nsearch_workers, batch_size) -> None:
         self.tracer = tracer
         self.port = port
         self.ip_addr = ip_addr
         self.knative_dns = knative_dns
         self.registry = registry
         self.model_path = model_path
+        self.bert_model_path = bert_model_path
         self.agent_rank = agent_rank
         self.agent_workers = agent_workers
         self.nsearch_rank = nsearch_rank
         self.nsearch_workers = nsearch_workers
+        self.batch_size = batch_size
+
+        self.lock = threading.Lock()
+        self.tag = 0
         pass
+    
+    def get_tag(self):
+        with self.lock:
+            self.tag += 1
+            return self.tag
+        
 
     def Query(self, prompt, context):
         try:
             print("Got prompt:", prompt)
-
             prompt = prompt.prompt
-            
-            inputs = self.tokenizer.encode(prompt, return_tensors="pt").cuda()
-            print("encoded")
-            outputs = self.model.generate(inputs, max_length=100, num_return_sequences=1)            
-
-            print("generated")
-            prompt = self.tokenizer.decode(outputs[0])
-            print("LLM resp: ", prompt)
-
             resp = self.geo_client.pseudo_req()
-            print("Pseudo geo resp:", resp.hotelIds)
             prompt += str(resp.hotelIds)
-
             resp = self.rate_client.pseudo_req()
-            print("Pseudo rate resp:", resp.ratePlans)
             prompt += str(resp.ratePlans)
-
             resp = self.recommendation_client.pseudo_req()
-            print("Pseudo rocommendation resp:", resp.HotelIds)
             prompt += str(resp.HotelIds)
 
-            inputs = self.tokenizer.encode(prompt, return_tensors="pt").cuda()
-            resp = self.agent_client.Query(inputs, self.tokenizer, self.hello_output) 
-            print("Agent resp:", resp.new_prompt)
-            prompt = resp.new_prompt 
+            input = self.tokenizer.encode("Hello World! " * 100, return_tensors="pt", add_special_tokens=False).cuda()
 
-            return pb.Result(new_prompt=prompt)
+            tag = self.get_tag()
+            self.agent_receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
+            new_prompt = self.result_q.get(tag)
+
+            return pb.Result(new_prompt=new_prompt)
         except Exception as e:
             print("Error Query:", e)
             traceback.print_exc()
-        # TODO
 
     def Search(self, prompt, context):
         try:
             print("Got prompt:", prompt)
-
             prompt = prompt.prompt
-            
-            inputs = self.tokenizer.encode(prompt, return_tensors="pt").cuda()
-            print("encoded")
-            outputs = self.model.generate(inputs, max_length=100, num_return_sequences=1)            
-
-            print("generated")
-            prompt = self.tokenizer.decode(outputs[0])
-            print("LLM resp: ", prompt)
-
             resp = self.geo_client.pseudo_req()
-            print("Pseudo geo resp:", resp.hotelIds)
             prompt += str(resp.hotelIds)
-
             resp = self.rate_client.pseudo_req()
-            print("Pseudo rate resp:", resp.ratePlans)
             prompt += str(resp.ratePlans)
-
             resp = self.recommendation_client.pseudo_req()
-            print("Pseudo recommendation resp:", resp.HotelIds)
             prompt += str(resp.HotelIds)
 
-            inputs = self.tokenizer.encode(prompt, return_tensors="pt").cuda()
-            resp = self.nsearch_client.Query(inputs, self.tokenizer, self.hello_output) 
-            print("NSearch resp:", resp.new_prompt)
-            prompt = resp.new_prompt 
+            input = self.tokenizer.encode("Hello World! " * 100, return_tensors="pt", add_special_tokens=False).cuda()
 
-            return pb.Result(new_prompt=prompt)
+            tag = self.get_tag()
+            self.nsearch_receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
+            new_prompt = self.result_q.get(tag)
+
+            return pb.Result(new_prompt=new_prompt)
         except Exception as e:
-            print("Error Search:", e)
+            print("Error Query:", e)
             traceback.print_exc()
-        # TODO
 
+    def pseudo_gen(self):
+        input = {
+            "input_ids": torch.stack([self.bert_input['input_ids'][0]]*self.batch_size, dim=0),
+            "attention_mask": torch.stack([self.bert_input['attention_mask'][0]]*self.batch_size, dim=0),
+        }
+        self.model(**input)
             
+    def run_gen(self, receiver, sender):
+        while True:
+            msgs = receiver.pop()
+            self.pseudo_gen()
+            sender.push(*msgs)
 
+    def run_get_grpc_res(self, sender, result_q, client):
+        while True:
+            msg = sender.grpc_get_msg()
+            prompt = self.tokenizer.decode(msg.tensor)
+            result = client.Query(prompt, msg.tag)
+            result_q.push(msg.tag, result.new_prompt)
+        
     def run(self):
         if self.port == None:
             raise ValueError("server port must be set")
         self.uuid = str(uuid.uuid4())
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained(self.model_path, trust_remote_code=True).quantize(4).cuda()
-        self.model = self.model.eval()
+        self.gen_q = unicomm.ThreadSafeQueue(self.batch_size)
+        self.send_q = unicomm.ThreadSafeQueue(self.batch_size)
 
-        hello_inputs = self.tokenizer.encode("Hello", return_tensors="pt").cuda()
-        self.hello_output = self.model.generate(hello_inputs, max_length=100, num_return_sequences=1)[0]            
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        # self.model = AutoModel.from_pretrained(self.model_path, trust_remote_code=True).quantize(4).cuda()
+        # self.model = self.model.eval()
 
         self.geo_client = unicomm.GeoClient("retriever")
         self.rate_client = unicomm.RateClient("retriever")
         self.recommendation_client = unicomm.RecommendationClient("retriever")
 
-        self.nsearch_client = unicomm.NSearchClient("retriever", self.nsearch_rank, self.nsearch_workers)
-        self.agent_client = unicomm.AgentClient("retriever", self.agent_rank, self.agent_workers)
+        self.nsearch_client = unicomm.NSearchClient("retriever")
+        self.agent_client = unicomm.AgentClient("retriever")
+
+        self.agent_receiver = unicomm.Receiver(self.batch_size) # this needs no p2p listening thread
+        self.nsearch_receiver = unicomm.Receiver(self.batch_size) # this needs no p2p listening thread
+        self.agent_sender = unicomm.Sender(self.batch_size)        
+        self.nsearch_sender = unicomm.Sender(1)        # cuz it's inter-node
+
+        self.model = DistilBertModel.from_pretrained(self.bert_model_path).to(torch.device("cuda"))
+        self.model = self.model.eval()
+
+        # pseudo bert encoded input
+        bert_tokenizer = DistilBertTokenizer.from_pretrained(self.bert_model_path) 
+        self.bert_input = bert_tokenizer("Hello World! " * 100, return_tensors="pt").to(torch.device("cuda"))
+
+        self.result_q = unicomm.ResultQueue(self.tokenizer)
+        
+        agent_gen_thread = threading.Thread(target=self.run_gen, args=[self.agent_receiver, self.agent_sender])
+        agent_gen_thread.start()
+        nsearch_gen_thread = threading.Thread(target=self.run_gen, args=[self.nsearch_receiver, self.nsearch_sender])
+        nsearch_gen_thread.start()
+
+        agent_send_thread = threading.Thread(target=self.agent_sender.send_recv_p2p, args=[self.agent_rank, self.result_q])
+        agent_send_thread.start()
+
+        nsearch_get_threads = [] 
+        for i in range(10):
+            nsearch_get_thread = threading.Thread(target=self.run_get_grpc_res, args=[self.nsearch_sender, self.result_q, self.nsearch_client])
+            nsearch_get_thread.start()
+            nsearch_get_threads.append(nsearch_get_thread)
+
+        
+
 
         GrpcInstrumentorClient().instrument()
         opts = [
@@ -143,4 +174,11 @@ class Server:
                                pb_grpc.add_RetrieverServicer_to_server,
                                self)
         hrs.run_servers(opts)
+
+        agent_gen_thread.join()
+        nsearch_gen_thread.join()
+        agent_send_thread.join()
+        for t in nsearch_get_threads:
+            t.join()
+        
             

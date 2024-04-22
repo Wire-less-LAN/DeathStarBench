@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rnsearch.proto\"\x1b\n\tNSRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\"\x1e\n\x08NSResult\x12\x12\n\nnew_prompt\x18\x01 \x01(\t2)\n\x07NSearch\x12\x1e\n\x05Query\x12\n.NSRequest\x1a\t.NSResultb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rnsearch.proto\"(\n\tNSRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x0b\n\x03tag\x18\x02 \x01(\x03\"+\n\x08NSResult\x12\x12\n\nnew_prompt\x18\x01 \x01(\t\x12\x0b\n\x03tag\x18\x02 \x01(\x03\x32)\n\x07NSearch\x12\x1e\n\x05Query\x12\n.NSRequest\x1a\t.NSResultb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,9 +22,9 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'nsearch_pb2', _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_NSREQUEST']._serialized_start=17
-  _globals['_NSREQUEST']._serialized_end=44
-  _globals['_NSRESULT']._serialized_start=46
-  _globals['_NSRESULT']._serialized_end=76
-  _globals['_NSEARCH']._serialized_start=78
-  _globals['_NSEARCH']._serialized_end=119
+  _globals['_NSREQUEST']._serialized_end=57
+  _globals['_NSRESULT']._serialized_start=59
+  _globals['_NSRESULT']._serialized_end=102
+  _globals['_NSEARCH']._serialized_start=104
+  _globals['_NSEARCH']._serialized_end=145
 # @@protoc_insertion_point(module_scope)

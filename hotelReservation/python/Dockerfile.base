@@ -2,5 +2,4 @@ FROM anliu/hr-agents-base:static
 
 WORKDIR /
 
-RUN rm /chatglm3-6b/pytorch_model-0000*
-RUN pip install cpm_kernels
+COPY distilbert-base-uncased/ bert-model/

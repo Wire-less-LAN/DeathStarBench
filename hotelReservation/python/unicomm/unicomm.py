@@ -1,7 +1,9 @@
+import logging
 import grpc
 import grpc.experimental
 import socket
 import os
+import queue
 import ipaddress
 import traceback
 import redis
@@ -30,6 +32,8 @@ import torch
 import torch.distributed as dist
 
 import threading
+
+import torch.distributed
 
 from unicomm.proto import geo_pb2 as geo, geo_pb2_grpc as geo_grpc, rate_pb2 as rate, rate_pb2_grpc as rate_grpc, recommendation_pb2 as recommendation, recommendation_pb2_grpc as recommendation_grpc, agent_pb2 as agent, agent_pb2_grpc as agent_grpc, nsearch_pb2 as nsearch, nsearch_pb2_grpc as nsearch_grpc
 
@@ -239,19 +243,221 @@ def init_process(master_addr, master_port, rank, size, backend='nccl'):
     os.environ['MASTER_PORT'] = master_port
     dist.init_process_group(backend, rank=rank, world_size=size)
 
-class ThreadSafeTag:
-    def __init__(self, max, value=0):
-        self.value = value
-        self.lock = threading.Lock()
-        self.max = max
+class ThreadSafeQueue:
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+        self.q = list()
+        self.waiting = False
+        self.available = False
+        self.condition = threading.Condition()
 
-    def next(self):
-        with self.lock:
-           self.value = (self.value + 1) % self.max
-           return self.value
+    def push(self, *msg):
+        with self.condition:
+            if self.waiting and self.available:
+                self.condition.wait() 
+
+            self.q += msg
+            if len(self.q) >= self.batch_size:
+                self.available = True
+                self.condition.notify()
+                
+    def pop(self):
+        with self.condition:
+            while len(self.q) < self.batch_size:
+                self.waiting = True
+                self.condition.wait() 
+            
+            ret = self.q[:self.batch_size+1]
+            self.q = self.q[self.batch_size+1:]
+            
+            self.waiting = self.available = False
+            self.condition.notify_all()
+
+        return ret
+                
+class Msg:
+    def __init__(self, tag, tensor):
+        self.tag = tag
+        self.tensor = tensor
+
+p2p_shape = [302]
+
+class Receiver:    
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+        self.q = ThreadSafeQueue(batch_size=batch_size)
+
+    def listen_p2p(self, src):
+        while True:
+            logging.info(f"listening p2p src={src}")
+
+            # get src batch size
+            src_size = torch.zeros([1], dtype=torch.int32).cuda()
+            dist.recv(tensor=src_size, src=src)
+            src_size = int(src_size.item())
+            logging.info(f"got src batch size={src_size}")
+
+
+            # [batch_sz * p2p_shape]
+            tensor = torch.zeros([src_size] + p2p_shape, dtype=torch.int32).cuda()
+            dist.recv(tensor=tensor, src=src)
+            logging.info(f"got batch tensors")
+
+            # extract tags and push into queue
+            msgs = []
+            tensors = tensor.unbind()
+            for t in tensors:
+                tag = t[0]
+                msgs.append(Msg(tag=tag, tensor=t[1:]))
+            
+            self.q.push(*msgs)
+    
+    # tags are pre-generated outside
+    # TODO: ensure it's formatted into shape
+    def push(self, *msgs):
+        self.q.push(*msgs)
+
+    def pop(self):
+       return self.q.pop()
+
+        
+class Sender:    
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+        self.q = ThreadSafeQueue(batch_size=batch_size)
+        self.lock = threading.Lock()
+    
+    def push(self, *msg):
+       self.q.push(*msg) 
+
+    def send_recv_p2p(self, dst, result_q):
+        while True:
+            msgs = self.q.pop() 
+            logging.info("popped msgs")
+
+            # [batch_sz * p2p_shape]
+            tensors = []
+            for m in msgs:
+                # add tag to the head of tensor
+                t = m.tensor
+                t = torch.cat((torch.tensor(m.tag).view([1]).cuda(), t), dim=0).cuda() 
+                tensors.append(t)
+
+            # batch size are pre-determined? (to reduce overhead) but it will be static then
+            # send src batch size
+            src_size = torch.tensor([self.batch_size]).cuda()
+            dist.send(tensor=src_size, dst=dst)
+            logging.info("sent size")
+
+                
+            tensor = torch.stack(tensors)
+            dist.send(tensor=tensor, dst=dst)
+            logging.info("sent tensors")
+
+            result_q.listen_p2p_once(dst)
+
+        
+    def send_p2p(self, dst):
+        while True:
+            msgs = self.q.pop() 
+            logging.info("[Sender] popped msgs")
+
+            # [batch_sz * p2p_shape]
+            tensors = []
+            for m in msgs:
+                # add tag to the head of tensor
+                t = m.tensor
+                t = torch.cat((torch.tensor(m.tag).view([1]).cuda(), t), dim=0).cuda() 
+                tensors.append(t)
+
+            # batch size are pre-determined? (to reduce overhead) but it will be static then
+            # send src batch size
+            src_size = torch.tensor([self.batch_size]).cuda()
+            dist.send(tensor=src_size, dst=dst)
+            logging.info("[Sender] sent size")
+
+                
+            tensor = torch.stack(tensors)
+            dist.send(tensor=tensor, dst=dst)
+            logging.info("[Sender] sent tensors")
+
+    # external caller should use this to get msg. Then decode it, send it throught grpc, and put it back to ResultQueue
+    # with the right tag
+    def grpc_get_msg(self):
+        if self.batch_size != 1:
+            raise ValueError("batch size should be set to 1 when using send_grpc")
+
+        return self.q.pop()[0]
+
+class ResultQueue:    
+    def __init__(self, tokenizer):
+        self.dict = dict()
+        self.cond = threading.Condition()
+        self.tokenizer = tokenizer
+
+    # external caller should only store str in this
+    def put(self, tag, result):
+        with self.cond:
+            self.dict[tag] = result
+            self.cond.notify_all()
+    
+    # this returns str, needs further processing
+    def get(self, tag):
+        with self.cond:
+            while tag not in self.dict:
+                self.cond.wait()
+            return self.dict[tag]
+
+    def listen_p2p_once(self, src):
+        # get src batch size
+        src_size = torch.zeros([1], dtype=torch.int32).cuda()
+        dist.recv(tensor=src_size, src=src)
+        src_size = int(src_size.item())
+        logging.info(f"[ResultQ] got batch size={src_size}")
+
+        # [batch_sz * p2p_shape]
+        tensor = torch.zeros([src_size] + p2p_shape, dtype=torch.int32).cuda()
+        dist.recv(tensor=tensor, src=src)
+        logging.info(f"[ResultQ] got batch tensors")
+
+        # extract tags and push into queue
+        msgs = []
+        tensors = tensor.unbind()
+        with self.cond:
+            for t in tensors:
+                tag = t[0]
+                s = self.tokenizer.decode(t[1:])
+                self.dict[tag] = s
+                logging.info(f"[ResultQ] tag{tag} arrived")
+            
+    
+
+        
+    # ensure the way of using tokenizer is right
+    def listen_p2p(self, src):
+        while True:
+            # get src batch size
+            src_size = torch.zeros([1], dtype=torch.int32).cuda()
+            dist.recv(tensor=src_size, src=src)
+            src_size = int(src_size.item())
+
+            # [batch_sz * p2p_shape]
+            tensor = torch.zeros([src_size] + p2p_shape, dtype=torch.int32).cuda()
+            dist.recv(tensor=tensor, src=src)
+
+            # extract tags and push into queue
+            msgs = []
+            tensors = tensor.unbind()
+            with self.cond:
+                for t in tensors:
+                    tag = t[0]
+                    s = self.tokenizer.decode(t[1:])
+                    self.dict[tag] = s
+            
+    
 
 class AgentClient:
-    def __init__(self, srv_name, dst, max_tag):
+    def __init__(self, srv_name):
         self.srv_name = srv_name
         
         chan = grpc.insecure_channel("agent:8089", options)
@@ -259,48 +465,30 @@ class AgentClient:
         self.stub = agent_grpc.AgentStub(chan)
         # self.unix_stub = agent_grpc.AgentStub(unix_chan)
 
-        self.dst = dst
+        # self.dst = dst
 
-        self.tag = ThreadSafeTag(max_tag)
+        # self.lock = threading.Lock()
 
-    def Query(self, prompt_tensor, tokenizer, hello_outputs):
-        comm_type = get_comm_type(self.srv_name, "agent")
+    def Query(self, prompt, tag):
+        # comm_type = get_comm_type(self.srv_name, "agent")
 
-        if comm_type == CommType.INTERNODE:
-            prompt = tokenizer.decode(prompt_tensor)
-            req = agent.AgentRequest(prompt="Hello"*100)
-            return self.stub.Query(req)
+        # if comm_type == CommType.INTERNODE:
+        req = agent.AgentRequest(prompt=prompt, tag=tag)
+        return self.stub.Query(req)
 
-        elif comm_type == CommType.INTERCPU:
-            # print("INTERGPU to agent, dst rank=", self.dst)
-            # shape_tensor = torch.tensor(prompt_tensor.shape).cuda()
-            # print("Sending shape_tensor:", shape_tensor)
-            # dist.send(tensor=shape_tensor, dst=self.dst)
+        # elif comm_type == CommType.INTERCPU:
+        #     with self.lock:
+        #         tensor = get_rand_tensor()
+        #         dist.send(tensor=tensor, dst=self.dst)
+        #         dist.recv(tensor=tensor, src=self.dst)
 
-            # prompt_tensor = prompt_tensor.cuda()
-            # print("Sending tensor:", prompt_tensor)
-            # dist.send(tensor=prompt_tensor, dst=self.dst)
-
-            # shape_tensor = torch.zeros(1, dtype=torch.long).cuda()
-            # dist.recv(tensor=shape_tensor, src=self.dst)
-            # print("Recv shape_tensor:", shape_tensor)
-
-            # tensor = torch.zeros(size=tuple(shape_tensor.tolist()), dtype=torch.long).cuda()
-            # dist.recv(tensor=tensor, src=self.dst)
-            # print("Recv tensor:", tensor)
-            tag = self.tag.next()
-            tensor = get_rand_tensor()
-            dist.send(tensor=tensor, dst=self.dst, tag=tag)
-
-            dist.recv(tensor=tensor, src=self.dst, tag=tag)
-
-            resp_str = tokenizer.decode(hello_outputs)
-            resp = agent.AgentResult(new_prompt=resp_str)
-            return resp
+        #         resp_str = tokenizer.decode(hello_outputs)
+        #         resp = agent.AgentResult(new_prompt=resp_str)
+        #         return resp
             
 
 class NSearchClient:
-    def __init__(self, srv_name, dst, max_tag):
+    def __init__(self, srv_name):
         self.srv_name = srv_name
         
         chan = grpc.insecure_channel("nsearch:8090", options)
@@ -308,44 +496,11 @@ class NSearchClient:
         self.stub = nsearch_grpc.NSearchStub(chan)
         # self.unix_stub = agent_grpc.AgentStub(unix_chan)
 
-        self.dst = dst
-        
-        self.tag = ThreadSafeTag(max_tag)
 
-    def Query(self, prompt_tensor, tokenizer, hello_outputs):
-        comm_type = get_comm_type(self.srv_name, "nsearch")
+    def Query(self, prompt, tag):
+        req = nsearch.NSRequest(prompt=prompt, tag=tag)
+        return self.stub.Query(req)
 
-        if comm_type == CommType.INTERNODE:
-            prompt = tokenizer.decode(prompt_tensor)
-            req = nsearch.NSRequest(prompt="Hello"*100)
-            return self.stub.Query(req)
-
-        elif comm_type == CommType.INTERCPU:
-            # print("INTERGPU to agent, dst rank=", self.dst)
-            # shape_tensor = torch.tensor(prompt_tensor.shape).cuda()
-            # print("Sending shape_tensor:", shape_tensor)
-            # dist.send(tensor=shape_tensor, dst=self.dst)
-
-            # prompt_tensor = prompt_tensor.cuda()
-            # print("Sending tensor:", prompt_tensor)
-            # dist.send(tensor=prompt_tensor, dst=self.dst)
-
-            # shape_tensor = torch.zeros(1, dtype=torch.long).cuda()
-            # dist.recv(tensor=shape_tensor, src=self.dst)
-            # print("Recv shape_tensor:", shape_tensor)
-
-            # tensor = torch.zeros(size=tuple(shape_tensor.tolist()), dtype=torch.long).cuda()
-            # dist.recv(tensor=tensor, src=self.dst)
-            # print("Recv tensor:", tensor)
-            tag = self.tag.next()
-            tensor = get_rand_tensor()
-            dist.send(tensor=tensor, dst=self.dst, tag=tag)
-
-            dist.recv(tensor=tensor, src=self.dst, tag=tag)
-
-            resp_str = tokenizer.decode(hello_outputs)
-            resp = nsearch.NSResult(new_prompt=resp_str)
-            return resp
             
 
 # class UniClient:

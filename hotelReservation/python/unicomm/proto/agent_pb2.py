@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\"\x1e\n\x0c\x41gentRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\"!\n\x0b\x41gentResult\x12\x12\n\nnew_prompt\x18\x01 \x01(\t2-\n\x05\x41gent\x12$\n\x05Query\x12\r.AgentRequest\x1a\x0c.AgentResultb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\"+\n\x0c\x41gentRequest\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x0b\n\x03tag\x18\x02 \x01(\x03\".\n\x0b\x41gentResult\x12\x12\n\nnew_prompt\x18\x01 \x01(\t\x12\x0b\n\x03tag\x18\x02 \x01(\x03\x32-\n\x05\x41gent\x12$\n\x05Query\x12\r.AgentRequest\x1a\x0c.AgentResultb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,9 +22,9 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'agent_pb2', _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_AGENTREQUEST']._serialized_start=15
-  _globals['_AGENTREQUEST']._serialized_end=45
-  _globals['_AGENTRESULT']._serialized_start=47
-  _globals['_AGENTRESULT']._serialized_end=80
-  _globals['_AGENT']._serialized_start=82
-  _globals['_AGENT']._serialized_end=127
+  _globals['_AGENTREQUEST']._serialized_end=58
+  _globals['_AGENTRESULT']._serialized_start=60
+  _globals['_AGENTRESULT']._serialized_end=106
+  _globals['_AGENT']._serialized_start=108
+  _globals['_AGENT']._serialized_end=153
 # @@protoc_insertion_point(module_scope)

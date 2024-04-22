@@ -84,6 +84,8 @@ def main():
     nsearch_workers = int(config["MaxNSearchWorkers"])
 
     unicomm.init_process(master_addr, master_port, rank, world_size)
+     
+    logging.info("Process Group initialized")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--jaegerAddr", default=config["jaegerAddress"], help="Jaeger address")
@@ -117,7 +119,9 @@ def main():
         agent_rank=agent_rank,
         nsearch_rank=nsearch_rank,
         agent_workers=agent_workers,
-        nsearch_workers=nsearch_workers
+        nsearch_workers=nsearch_workers,
+        batch_size=1,
+        bert_model_path="/bert-model",
     )
 
     logging.info("Starting server...")

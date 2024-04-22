@@ -113,7 +113,9 @@ def main():
         registry=registry_client,
         model_path="/chatglm3-6b",
         retriever_rank = retriever_rank,
-        workers=agent_workers
+        workers=agent_workers,
+        batch_size=1,
+        bert_model_path="/bert-model",
     )
 
     logging.info("Starting server...")
