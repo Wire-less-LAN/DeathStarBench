@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/delimitrou/DeathStarBench/hotelreservation/dialer"
+	retriever "github.com/delimitrou/DeathStarBench/hotelreservation/python/retriever/proto"
 	"github.com/delimitrou/DeathStarBench/hotelreservation/registry"
 	profile "github.com/delimitrou/DeathStarBench/hotelreservation/services/profile/proto"
 	search "github.com/delimitrou/DeathStarBench/hotelreservation/services/search/proto"
@@ -36,6 +37,7 @@ type Server struct {
 	uniUserClient           unicomm.UniClient
 	reservationClient       reservation.ReservationClient
 	uniReservationClient    unicomm.UniClient
+	uniRetrieverClient      unicomm.UniClient
 	KnativeDns              string
 	IpAddr                  string
 	Port                    int
@@ -66,6 +68,9 @@ func (s *Server) Run() error {
 	if s.uniReservationClient, err = unicomm.InitUniClient("frontend", "reservation", "srv-reservation", "/reservation.Reservation/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
 		return err
 	}
+	if s.uniRetrieverClient, err = unicomm.InitUniClient("frontend", "retriever", "srv-retriever", "/Retriever/", s.KnativeDns, &s.Tracer, s.Registry); err != nil {
+		return err
+	}
 
 	// if err := s.initProfileClient("srv-profile"); err != nil {
 	// 	return err
@@ -91,6 +96,7 @@ func (s *Server) Run() error {
 	mux.Handle("/recommendations", http.HandlerFunc(s.recommendHandler))
 	mux.Handle("/user", http.HandlerFunc(s.userHandler))
 	mux.Handle("/reservation", http.HandlerFunc(s.reservationHandler))
+	mux.Handle("/query", http.HandlerFunc(s.queryHandler))
 
 	log.Trace().Msg("frontend starts serving")
 
@@ -168,6 +174,71 @@ func (s *Server) getGprcConn(name string) (*grpc.ClientConn, error) {
 			dialer.WithTracer(s.Tracer),
 			dialer.WithBalancer(s.Registry.Client),
 		)
+	}
+}
+
+func (s *Server) queryHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	log.Trace().Msg("starts queryHandler")
+
+	// prompt from params
+	method := r.URL.Query().Get("method")
+	if method == "" {
+		http.Error(w, "Please specify method", http.StatusBadRequest)
+		return
+	}
+	prompt := r.URL.Query().Get("prompt")
+	if prompt == "" {
+		http.Error(w, "Please specify prompt", http.StatusBadRequest)
+		return
+	}
+	log.Trace().Msg("starts queryHandler querying downstream")
+
+	if method == "query" {
+		log.Trace().Msgf("RETRIEVER QUERY [prompt: %v]", prompt)
+		tmp, err := s.uniRetrieverClient.Call(ctx, "Query", &retriever.Request{
+			Prompt: prompt,
+		}, reflect.TypeFor[retriever.Result]())
+		if err != nil {
+			log.Error().Msgf("Retriever.Query failed: %s", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp, ok := tmp.(*retriever.Result)
+		if !ok {
+			log.Error().Msgf("failed to convert retriever.Query's resp")
+			http.Error(w, "failed to convert retriever.Query's resp", http.StatusInternalServerError)
+			return
+		}
+
+		log.Info().Msg("QueryHandler got resp")
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"resp": resp.NewPrompt})
+	} else if method == "search" {
+		log.Trace().Msgf("RETRIEVER SEARCH [prompt: %v]", prompt)
+		tmp, err := s.uniRetrieverClient.Call(ctx, "Search", &retriever.Request{
+			Prompt: prompt,
+		}, reflect.TypeFor[retriever.Result]())
+		if err != nil {
+			log.Error().Msgf("Retriever.Search failed: %s", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp, ok := tmp.(*retriever.Result)
+		if !ok {
+			log.Error().Msgf("failed to convert retriever.Search's resp")
+			http.Error(w, "failed to convert retriever.Search's resp", http.StatusInternalServerError)
+			return
+		}
+
+		log.Info().Msg("QueryHandler got resp")
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"resp": resp.NewPrompt})
+	} else {
+		http.Error(w, "Invalid method", http.StatusBadRequest)
+		return
 	}
 }
 

@@ -41,7 +41,7 @@ class Server:
 
     def Query(self, prompt, context):
         try:
-            print("Got prompt:", prompt)
+            logging.debug("Got prompt")
             tag = prompt.tag
             prompt = prompt.prompt
             
@@ -64,17 +64,19 @@ class Server:
     def run_gen(self, receiver, sender):
         while True:
             msgs = receiver.pop()
-            logging.info("[RUNGEN] popped msgs")
+            logging.debug("[RUNGEN] popped msgs")
             self.pseudo_gen()
-            logging.info("[RUNGEN] generated")
+            logging.debug("[RUNGEN] generated")
             sender.push(*msgs)
-            logging.info("[RUNGEN] pushed to sender")
+            logging.debug("[RUNGEN] pushed to sender")
 
     def run_get_grpc_res(self, sender, result_q):
         while True:
             msg = sender.grpc_get_msg()
             prompt = self.tokenizer.decode(msg.tensor)
-            result_q.push(msg.tag, prompt)
+            logging.debug(f"[RUNGRPC] decoded: {prompt}")
+            result_q.put(msg.tag, prompt)
+            logging.debug(f"[RUNGRPC] put tag: {msg.tag}")
 
 
     def run(self):
@@ -89,7 +91,7 @@ class Server:
 
         # pseudo bert encoded input
         bert_tokenizer = DistilBertTokenizer.from_pretrained(self.bert_model_path) 
-        self.bert_input = bert_tokenizer("Hello World!", return_tensors="pt").to(torch.device("cuda"))
+        self.bert_input = bert_tokenizer("Hello World!" * 100, return_tensors="pt").to(torch.device("cuda"))
 
         self.receiver = unicomm.Receiver(self.batch_size) 
         # receive_p2p_thread = threading.Thread(target=self.receiver.listen_p2p, args=[self.retriever_rank])

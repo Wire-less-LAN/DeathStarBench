@@ -114,7 +114,7 @@ def main():
         model_path="/chatglm3-6b",
         retriever_rank = retriever_rank,
         workers=agent_workers,
-        batch_size=1,
+        batch_size=unicomm.batch_size,
         bert_model_path="/bert-model",
     )
 

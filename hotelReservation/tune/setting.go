@@ -48,7 +48,7 @@ func setLogLevel() {
 	// default: // Set default log level to info
 	// 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	// }
-	zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 
 	log.Info().Msgf("Set global log level: %s", logLevel)
 }

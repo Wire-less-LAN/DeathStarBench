@@ -15,6 +15,7 @@ COPY tracing/ tracing/
 COPY tune/ tune/
 
 COPY unicomm/ unicomm/
+COPY python/retriever python/retriever
 
 COPY config.json config.json
 

@@ -120,7 +120,7 @@ def main():
         nsearch_rank=nsearch_rank,
         agent_workers=agent_workers,
         nsearch_workers=nsearch_workers,
-        batch_size=1,
+        batch_size=unicomm.batch_size,
         bert_model_path="/bert-model",
     )
 

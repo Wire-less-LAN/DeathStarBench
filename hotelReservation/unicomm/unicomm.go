@@ -92,7 +92,7 @@ const (
 	INTRAGPU
 )
 
-func GetCommType(srv_a string, srv_b string) (CommType, error) {
+func GetCommType(srv_a string, srv_b string, tracer *opentracing.Tracer) (CommType, error) {
 	rdb := redis.NewClient(&redis.Options{
 		Network:  "unix",
 		Addr:     "/var/run/redis/redis.sock",
@@ -111,6 +111,13 @@ func GetCommType(srv_a string, srv_b string) (CommType, error) {
 		return -1, err
 	}
 
+	// span := (*tracer).StartSpan("incr rdb")
+	err = rdb.Incr(redis_ctx, srv_b+".rqs").Err()
+	if err != nil {
+		return -1, err
+	}
+	// span.Finish()
+
 	if a_loc == b_loc { //TODO: inter-gpu, intra-gpu
 		return INTERCPU, nil
 	} else {
@@ -124,6 +131,7 @@ type UniClient struct {
 	funcPrefix string
 	conn       *grpc.ClientConn
 	unixConn   *grpc.ClientConn
+	tracer     *opentracing.Tracer
 }
 
 func InitUniClient(cmdName string, tgtCmdName string, tgtSrvName string, funcPrefix string, knativeDns string, tracer *opentracing.Tracer, rc *registry.Client) (UniClient, error) {
@@ -154,13 +162,14 @@ func InitUniClient(cmdName string, tgtCmdName string, tgtSrvName string, funcPre
 		tgtCmdName,
 		funcPrefix,
 		conn,
-		unixConn}, nil
+		unixConn,
+		tracer}, nil
 }
 
 func (c *UniClient) Call(ctx context.Context, funcName string, in interface{}, respType reflect.Type, opts ...grpc.CallOption) (interface{}, error) {
 	out := reflect.New(respType).Interface()
 
-	commType, err := GetCommType(c.cmdName, c.tgtCmdName)
+	commType, err := GetCommType(c.cmdName, c.tgtCmdName, c.tracer)
 	if err != nil {
 		return nil, err
 	}

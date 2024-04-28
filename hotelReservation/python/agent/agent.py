@@ -56,31 +56,52 @@ class Server:
 
     def pseudo_gen(self):
         try:
-            logging.info("stacking")
+            logging.debug("stacking")
             input = {
                 "input_ids": torch.stack([self.bert_input['input_ids'][0]]*self.batch_size, dim=0),
                 "attention_mask": torch.stack([self.bert_input['attention_mask'][0]]*self.batch_size, dim=0),
             }
-            logging.info("stacked")
+            logging.debug("stacked")
             self.model(**input)
         except KeyboardInterrupt as e:
             traceback.print_stack()
             
             
-    def run_gen(self, receiver, sender):
+    def run_gen(self):
         while True:
-            msgs = receiver.pop()
-            logging.info("[RUNGEN] popped msgs")
+            src = self.retriever_rank
+            logging.debug(f"listening p2p src={self.retriever_rank}")
+
+            # get src batch size
+            src_size = torch.zeros([1], dtype=torch.int32).cuda()
+            dist.recv(tensor=src_size, src=src)
+            src_size = int(src_size.item())
+            logging.debug(f"got src batch size={src_size}")
+
+            # [batch_sz * p2p_shape]
+            tensor = torch.zeros([src_size] + unicomm.p2p_shape, dtype=torch.int32).cuda()
+            dist.recv(tensor=tensor, src=src)
+            logging.debug(f"got batch tensors {tensor}")
+
             self.pseudo_gen()
-            logging.info("[RUNGEN] generated")
-            sender.push(*msgs)
-            logging.info("[RUNGEN] pushed to sender")
+            logging.debug(f"generated")
+
+            # batch size are pre-determined? (to reduce overhead) but it will be static then
+            # send src batch size
+            src_size = torch.tensor([self.batch_size], dtype=torch.int32).cuda()
+            dist.send(tensor=src_size, dst=src)
+            logging.debug("sent size")
+
+            dist.send(tensor=tensor, dst=src)
+            logging.debug(f"sent tensors {tensor}")
+
 
     def run_get_grpc_res(self, sender, result_q):
         while True:
             msg = sender.grpc_get_msg()
             prompt = self.tokenizer.decode(msg.tensor)
             result_q.push(msg.tag, prompt)
+
 
     def run(self):
         if self.port == None:
@@ -96,23 +117,23 @@ class Server:
         bert_tokenizer = DistilBertTokenizer.from_pretrained(self.bert_model_path) 
         self.bert_input = bert_tokenizer("Hello World! " * 100, return_tensors="pt").to(torch.device("cuda"))
 
-        self.receiver = unicomm.Receiver(self.batch_size) 
-        receive_p2p_thread = threading.Thread(target=self.receiver.listen_p2p, args=[self.retriever_rank])
-        receive_p2p_thread.start()
+        # self.receiver = unicomm.Receiver(self.batch_size) 
+        # receive_p2p_thread = threading.Thread(target=self.receiver.listen_p2p, args=[self.retriever_rank])
+        # receive_p2p_thread.start()
     
         self.sender = unicomm.Sender(self.batch_size)        
-        gen_thread = threading.Thread(target=self.run_gen, args=[self.receiver, self.sender])
+        gen_thread = threading.Thread(target=self.run_gen)
         gen_thread.start()
 
-        self.result_q = unicomm.ResultQueue(self.tokenizer)
+        # self.result_q = unicomm.ResultQueue(self.tokenizer)
 
         
-        get_threads = [] 
+        # get_threads = [] 
         # for i in range(10):
         #     get_thread = threading.Thread(target=self.run_get_grpc_res, args=[self.sender, self.result_q])
         #     get_threads.append(get_thread)
-        send_thread = threading.Thread(target=self.sender.send_p2p, args=[self.retriever_rank])
-        send_thread.start()
+        # send_thread = threading.Thread(target=self.sender.send_p2p, args=[self.retriever_rank])
+        # send_thread.start()
 
         GrpcInstrumentorClient().instrument()
         opts = [
@@ -131,8 +152,8 @@ class Server:
 
         hrs.run_servers(opts)
 
-        receive_p2p_thread.join()
+        # receive_p2p_thread.join()
         gen_thread.join()
-        for t in get_threads:
-            t.join()
-        send_thread.join()
+        # for t in get_threads:
+        #     t.join()
+        # send_thread.join()

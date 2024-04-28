@@ -37,6 +37,11 @@ import torch.distributed
 
 from unicomm.proto import geo_pb2 as geo, geo_pb2_grpc as geo_grpc, rate_pb2 as rate, rate_pb2_grpc as rate_grpc, recommendation_pb2 as recommendation, recommendation_pb2_grpc as recommendation_grpc, agent_pb2 as agent, agent_pb2_grpc as agent_grpc, nsearch_pb2 as nsearch, nsearch_pb2_grpc as nsearch_grpc
 
+batch_size = 1 
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+
 def get_rand_tensor():
     return torch.randint(0, 32766, (500, 1), dtype=torch.long).cuda()
 
@@ -112,9 +117,9 @@ class HRServer:
 
     def run_servers(self, opts):
         GrpcInstrumentorServer().instrument()
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), options=opts)
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=max(batch_size * 2, 16)), options=opts)
         # server = intercept_server(server, grpc_opentracing.open_tracing_server_interceptor(self.server.tracer))
-        unix_server = grpc.server(futures.ThreadPoolExecutor(max_workers=16), options=opts)
+        unix_server = grpc.server(futures.ThreadPoolExecutor(max_workers=max(batch_size * 2, 16)), options=opts)
         # unix_server = intercept_server(unix_server, grpc_opentracing.open_tracing_server_interceptor(self.server.tracer))
 
         self.register_func(self.server, server)
@@ -181,6 +186,9 @@ def get_comm_type(srv_a, srv_b):
     r = redis.Redis(unix_socket_path="/var/run/redis/redis.sock")
     a_loc = r.get(srv_a)
     b_loc = r.get(srv_b)
+    r.incr(srv_b + ".rqs")
+
+    r.close()
 
     if a_loc == b_loc:  # TODO: handle inter-gpu, intra-gpu
         return CommType.INTERCPU
@@ -247,31 +255,30 @@ class ThreadSafeQueue:
     def __init__(self, batch_size):
         self.batch_size = batch_size
         self.q = list()
-        self.waiting = False
-        self.available = False
+        self.waiting = 0
         self.condition = threading.Condition()
 
     def push(self, *msg):
         with self.condition:
-            if self.waiting and self.available:
+            if self.waiting > 0 and len(self.q) >= self.batch_size:
                 self.condition.wait() 
 
             self.q += msg
             if len(self.q) >= self.batch_size:
-                self.available = True
-                self.condition.notify()
+                self.condition.notify_all()
                 
     def pop(self):
         with self.condition:
             while len(self.q) < self.batch_size:
-                self.waiting = True
+                self.waiting += 1
                 self.condition.wait() 
+                self.waiting -= 1
             
-            ret = self.q[:self.batch_size+1]
-            self.q = self.q[self.batch_size+1:]
+            ret = self.q[:self.batch_size]
+            self.q = self.q[self.batch_size:]
             
-            self.waiting = self.available = False
-            self.condition.notify_all()
+            if len(self.q) < self.batch_size:
+                self.condition.notify_all()
 
         return ret
                 
@@ -280,7 +287,7 @@ class Msg:
         self.tag = tag
         self.tensor = tensor
 
-p2p_shape = [302]
+p2p_shape = [3002]
 
 class Receiver:    
     def __init__(self, batch_size):
@@ -289,19 +296,18 @@ class Receiver:
 
     def listen_p2p(self, src):
         while True:
-            logging.info(f"listening p2p src={src}")
+            logging.debug(f"listening p2p src={src}")
 
             # get src batch size
             src_size = torch.zeros([1], dtype=torch.int32).cuda()
             dist.recv(tensor=src_size, src=src)
             src_size = int(src_size.item())
-            logging.info(f"got src batch size={src_size}")
-
+            logging.debug(f"got src batch size={src_size}")
 
             # [batch_sz * p2p_shape]
             tensor = torch.zeros([src_size] + p2p_shape, dtype=torch.int32).cuda()
             dist.recv(tensor=tensor, src=src)
-            logging.info(f"got batch tensors")
+            logging.debug(f"got batch tensors")
 
             # extract tags and push into queue
             msgs = []
@@ -333,26 +339,28 @@ class Sender:
     def send_recv_p2p(self, dst, result_q):
         while True:
             msgs = self.q.pop() 
-            logging.info("popped msgs")
+            logging.debug("popped msgs")
 
             # [batch_sz * p2p_shape]
             tensors = []
             for m in msgs:
                 # add tag to the head of tensor
                 t = m.tensor
-                t = torch.cat((torch.tensor(m.tag).view([1]).cuda(), t), dim=0).cuda() 
+                t = torch.cat((torch.tensor(m.tag, dtype=torch.int32).view([1]).cuda(), t), dim=0).cuda() 
+                logging.debug(f"tag {m.tag}")
                 tensors.append(t)
 
             # batch size are pre-determined? (to reduce overhead) but it will be static then
             # send src batch size
-            src_size = torch.tensor([self.batch_size]).cuda()
+            src_size = torch.tensor([self.batch_size], dtype=torch.int32).cuda()
             dist.send(tensor=src_size, dst=dst)
-            logging.info("sent size")
+            logging.debug(f"sent size {src_size}")
 
                 
             tensor = torch.stack(tensors)
+            tensor = tensor.type(dtype=torch.int32)
             dist.send(tensor=tensor, dst=dst)
-            logging.info("sent tensors")
+            logging.debug(f"sent tensors {tensor.dtype} {tensor}")
 
             result_q.listen_p2p_once(dst)
 
@@ -360,7 +368,7 @@ class Sender:
     def send_p2p(self, dst):
         while True:
             msgs = self.q.pop() 
-            logging.info("[Sender] popped msgs")
+            logging.debug("[Sender] popped msgs")
 
             # [batch_sz * p2p_shape]
             tensors = []
@@ -374,12 +382,12 @@ class Sender:
             # send src batch size
             src_size = torch.tensor([self.batch_size]).cuda()
             dist.send(tensor=src_size, dst=dst)
-            logging.info("[Sender] sent size")
+            logging.debug("[Sender] sent size")
 
                 
             tensor = torch.stack(tensors)
             dist.send(tensor=tensor, dst=dst)
-            logging.info("[Sender] sent tensors")
+            logging.debug("[Sender] sent tensors")
 
     # external caller should use this to get msg. Then decode it, send it throught grpc, and put it back to ResultQueue
     # with the right tag
@@ -387,6 +395,7 @@ class Sender:
         if self.batch_size != 1:
             raise ValueError("batch size should be set to 1 when using send_grpc")
 
+        logging.debug(f"[SENDER] popping, list={self.q}")
         return self.q.pop()[0]
 
 class ResultQueue:    
@@ -405,6 +414,7 @@ class ResultQueue:
     def get(self, tag):
         with self.cond:
             while tag not in self.dict:
+                # logging.debug(f"[ResultQ] Woken from wait(), dict:{self.dict}")
                 self.cond.wait()
             return self.dict[tag]
 
@@ -413,12 +423,12 @@ class ResultQueue:
         src_size = torch.zeros([1], dtype=torch.int32).cuda()
         dist.recv(tensor=src_size, src=src)
         src_size = int(src_size.item())
-        logging.info(f"[ResultQ] got batch size={src_size}")
+        logging.debug(f"[ResultQ] got batch size={src_size}")
 
         # [batch_sz * p2p_shape]
         tensor = torch.zeros([src_size] + p2p_shape, dtype=torch.int32).cuda()
         dist.recv(tensor=tensor, src=src)
-        logging.info(f"[ResultQ] got batch tensors")
+        logging.debug(f"[ResultQ] got batch tensors {tensor}")
 
         # extract tags and push into queue
         msgs = []
@@ -427,8 +437,9 @@ class ResultQueue:
             for t in tensors:
                 tag = t[0]
                 s = self.tokenizer.decode(t[1:])
-                self.dict[tag] = s
-                logging.info(f"[ResultQ] tag{tag} arrived")
+                self.dict[tag.item()] = s
+                logging.debug(f"[ResultQ] tag{tag} arrived")
+            self.cond.notify_all()
             
     
 

@@ -1,6 +1,7 @@
 import traceback
 
 from opentracing import global_tracer
+from opentelemetry import trace
 from grpc_opentracing import open_tracing_client_interceptor
 from grpc_opentracing.grpcext import intercept_channel, intercept_server
 from proto import retriever_pb2 as pb, retriever_pb2_grpc as pb_grpc
@@ -21,6 +22,8 @@ import torch
 
 import threading
 
+import logging
+import time
 class Server:
     def __init__(self, tracer, port, ip_addr, knative_dns, registry, model_path, bert_model_path, agent_rank, nsearch_rank, agent_workers, nsearch_workers, batch_size) -> None:
         self.tracer = tracer
@@ -48,29 +51,30 @@ class Server:
 
     def Query(self, prompt, context):
         try:
-            print("Got prompt:", prompt)
-            prompt = prompt.prompt
-            resp = self.geo_client.pseudo_req()
-            prompt += str(resp.hotelIds)
-            resp = self.rate_client.pseudo_req()
-            prompt += str(resp.ratePlans)
-            resp = self.recommendation_client.pseudo_req()
-            prompt += str(resp.HotelIds)
+            with self.tracer.start_as_current_span("Retriever/Query"):
+                logging.debug("Got prompt")
+                prompt = prompt.prompt
+                resp = self.geo_client.pseudo_req()
+                prompt += str(resp.hotelIds)
+                resp = self.rate_client.pseudo_req()
+                prompt += str(resp.ratePlans)
+                resp = self.recommendation_client.pseudo_req()
+                prompt += str(resp.HotelIds)
 
-            input = self.tokenizer.encode("Hello World! " * 100, return_tensors="pt", add_special_tokens=False).cuda()
+                input = self.tokenizer.encode("Hello World! " * 1000, return_tensors="pt", add_special_tokens=False).cuda()
 
-            tag = self.get_tag()
-            self.agent_receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
-            new_prompt = self.result_q.get(tag)
+                tag = self.get_tag()
+                self.agent_receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
+                new_prompt = self.result_q.get(tag)
 
-            return pb.Result(new_prompt=new_prompt)
+                return pb.Result(new_prompt=new_prompt)
         except Exception as e:
             print("Error Query:", e)
             traceback.print_exc()
 
     def Search(self, prompt, context):
         try:
-            print("Got prompt:", prompt)
+            logging.debug("Got prompt")
             prompt = prompt.prompt
             resp = self.geo_client.pseudo_req()
             prompt += str(resp.hotelIds)
@@ -78,10 +82,13 @@ class Server:
             prompt += str(resp.ratePlans)
             resp = self.recommendation_client.pseudo_req()
             prompt += str(resp.HotelIds)
+            logging.debug("grpc finished")
 
-            input = self.tokenizer.encode("Hello World! " * 100, return_tensors="pt", add_special_tokens=False).cuda()
+            input = self.tokenizer.encode("Hello World! " * 1000, return_tensors="pt", add_special_tokens=False).cuda()
+            logging.debug("input encoded")
 
             tag = self.get_tag()
+            logging.debug(f"got tag={tag}")
             self.nsearch_receiver.push(unicomm.Msg(tag=tag, tensor=input[0]))
             new_prompt = self.result_q.get(tag)
 
@@ -108,7 +115,7 @@ class Server:
             msg = sender.grpc_get_msg()
             prompt = self.tokenizer.decode(msg.tensor)
             result = client.Query(prompt, msg.tag)
-            result_q.push(msg.tag, result.new_prompt)
+            result_q.put(msg.tag, result.new_prompt)
         
     def run(self):
         if self.port == None:
@@ -152,17 +159,16 @@ class Server:
         agent_send_thread.start()
 
         nsearch_get_threads = [] 
-        for i in range(10):
+        for i in range(self.batch_size):
             nsearch_get_thread = threading.Thread(target=self.run_get_grpc_res, args=[self.nsearch_sender, self.result_q, self.nsearch_client])
             nsearch_get_thread.start()
             nsearch_get_threads.append(nsearch_get_thread)
 
-        
-
+        self.tracer = trace.get_tracer(__name__)
 
         GrpcInstrumentorClient().instrument()
         opts = [
-        ('grpc.keepalive_timeout_ms', 120 * 1000),  
+        ('grpc.keepalive_timeout_ms', 5 * 1000),  
         ('grpc.keepalive_permit_without_calls', 1),  
         ]
         hrs = unicomm.HRServer("srv-retriever",

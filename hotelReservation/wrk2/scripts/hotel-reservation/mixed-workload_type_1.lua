@@ -109,6 +109,22 @@ local function user_login()
   return wrk.format(method, path, headers, nil)
 end
 
+local function query()
+  local method = "POST"
+  local path = url .. "/query?method=query&prompt=HelloWorld"
+  local headers = {}
+  -- headers["Content-Type"] = "application/x-www-form-urlencoded"
+  return wrk.format(method, path, headers, nil)
+end
+
+local function search()
+  local method = "POST"
+  local path = url .. "/query?method=search&prompt=HelloWorld"
+  local headers = {}
+  -- headers["Content-Type"] = "application/x-www-form-urlencoded"
+  return wrk.format(method, path, headers, nil)
+end
+
 request = function()
   cur_time = math.floor(socket.gettime())
   local search_ratio      = 0.6
@@ -127,3 +143,15 @@ request = function()
     return reserve(url)
   end
 end
+
+-- local switch = false
+
+-- request = function()
+--   switch = not switch
+--   if switch == true then
+--     return search(url)
+--   else
+--     return query(url)
+--   end
+-- end
+
